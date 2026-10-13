@@ -62,8 +62,12 @@ function normalize(body, asset) {
       if (!(qty > 0) || !(price > 0)) return { error: '数量与成交价需大于 0' };
       v.qty = qty; v.price = price;
       v.marginCNY = marginCNY;      // 买入：本次使用的融资额；卖出：忽略（还款由引擎按所得自动计算）
-      if (type === 'buy' && marginCNY > qty * price + 1e-6) {
-        return { error: `融资（¥${marginCNY}）不能超过成交金额（¥${+(qty * price).toFixed(2)}）—— 成交金额请填「自付 + 融资」的总额` };
+      /* 融资与成交金额必须同口径比较：marginCNY 为 CNY，成交金额/手续费为账户币种，需 ×fx 换算
+        （此前裸比导致 USD 全融资买入被误判「融资超过成交金额」）。
+        上限 = 成交金额 + 手续费（×fx），与引擎现金公式 cash -= (gross+fee)×f − margin 的自付≥0 对齐，
+        即手续费也可由融资覆盖。 */
+      if (type === 'buy' && marginCNY > (qty * price + fee) * fx + 1e-6) {
+        return { error: `融资（¥${marginCNY}）不能超过成交金额+手续费（¥${+((qty * price + fee) * fx).toFixed(2)}）—— 成交金额请填「自付 + 融资」的总额` };
       }
     } else if (type === 'div') {
       const r = incomeAmount();
@@ -98,8 +102,9 @@ function normalize(body, asset) {
       }
       v.qty = qty; v.price = price; v.amount = +(qty * price).toFixed(2);
       v.marginCNY = marginCNY;      // 申购：本次使用的融资额
-      if (type === 'invest' && marginCNY > qty * price + 1e-6) {
-        return { error: `融资（¥${marginCNY}）不能超过申购金额（¥${+(qty * price).toFixed(2)}）—— 金额请填「自付 + 融资」的总额` };
+      /* 同买入：与成交金额+手续费（×fx → CNY）同口径比较，与引擎现金公式对齐 */
+      if (type === 'invest' && marginCNY > (qty * price + fee) * fx + 1e-6) {
+        return { error: `融资（¥${marginCNY}）不能超过申购金额+手续费（¥${+((qty * price + fee) * fx).toFixed(2)}）—— 金额请填「自付 + 融资」的总额` };
       }
     } else {
       const r = incomeAmount();

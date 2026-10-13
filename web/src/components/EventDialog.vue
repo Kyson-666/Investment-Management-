@@ -24,8 +24,9 @@
           <el-form-item label="数量(股)" required>
             <el-input-number v-model="form.qty" :min="0" :precision="0" controls-position="right" style="width:200px" />
           </el-form-item>
-          <el-form-item :label="`成交价(${ccyName(asset?.currency)})`" required>
+          <el-form-item label="成交价" required>
             <el-input-number v-model="form.price" :min="0" :precision="3" controls-position="right" style="width:200px" />
+            <span class="form-tip" style="margin-left:8px">单位：{{ ccyName(asset?.currency) }}</span>
           </el-form-item>
           <el-form-item label="标记为做T" v-if="form.side === 'buy'">
             <el-switch v-model="form.isT" :active-value="1" :inactive-value="0" />
@@ -38,9 +39,9 @@
               <el-radio-button label="USD">美元 USD</el-radio-button>
             </el-radio-group>
           </el-form-item>
-          <el-form-item :label="`分红金额(${form.incCurrency})`" required>
+          <el-form-item label="分红金额" required>
             <el-input-number v-model="form.amount" :precision="2" controls-position="right" style="width:200px" />
-            <div class="form-tip" style="margin-left:8px">可为负数（用于记录融资利息等支出）</div>
+            <div class="form-tip" style="margin-left:8px">单位：{{ form.incCurrency === 'USD' ? '美元' : '人民币' }}；可为负数（用于记录融资利息等支出）</div>
           </el-form-item>
         </template>
         <el-form-item label="送股数量" required v-else-if="form.side === 'bonus'">
@@ -81,9 +82,9 @@
               <el-radio-button label="USD">美元 USD</el-radio-button>
             </el-radio-group>
           </el-form-item>
-          <el-form-item :label="`金额(${form.incCurrency})`" required>
+          <el-form-item label="金额" required>
             <el-input-number v-model="form.amount" :precision="2" controls-position="right" style="width:240px" />
-            <div class="form-tip" style="margin-left:8px">可为负数（用于记录融资利息等支出）</div>
+            <div class="form-tip" style="margin-left:8px">单位：{{ form.incCurrency === 'USD' ? '美元' : '人民币' }}；可为负数（用于记录融资利息等支出）</div>
           </el-form-item>
         </template>
       </template>
@@ -105,11 +106,11 @@
           <div class="form-tip" style="line-height:1.7">
             单位为{{ ccyName(form.marginCurrency) }}；留空或 0 表示全部用自有资金。
             <br>
-            ⚠️ 这里的<b>成交金额 / 申购金额请填「自付 + 融资」的总额</b>（融资是其中借来的部分）。
+            ⚠️ <b>融资不能超过「成交金额 + 手续费」</b>——成交金额请填「自付 + 融资」的总额（融资是其中借来的部分，手续费也可由融资覆盖）。
             <template v-if="+form.margin > 0">
               <br>
-              本次 <b>总额 {{ fmtMoney(grossAmount) }}</b> − <b>融资 {{ fmtMoney(+form.margin) }}</b>
-              = <b>你要自付 {{ fmtMoney(selfPaid) }}</b> {{ form.marginCurrency }}
+              本次 <b>总额 {{ fmtMoney(grossAmount) }} {{ asset?.currency }}</b> − <b>融资 {{ fmtMoney(+form.margin) }} {{ form.marginCurrency }}</b>
+              = <b>你要自付 {{ fmtMoney(selfPaid) }} {{ form.marginCurrency }}</b>
               <span v-if="selfPaid < 0" style="color:#c45656">（融资已超过总额，请检查录入）</span>
             </template>
             <br>
@@ -177,16 +178,20 @@ function rateFallback() {
 const store = usePortfolioStore();
 /** 本次买入/申购的成交总额（资产币种） */
 const grossAmount = computed(() => (+form.qty || 0) * (+form.price || 0));
-/** 自付 = 成交总额 − 融资额（把融资换算到同一币种后相减） */
+/** 自付 = 成交总额 + 手续费 − 融资额（统一换算到融资录入币种后相减；rate = 1 USD = ? CNY）。
+    口径与后端校验、引擎现金公式一致：融资 ≤ 成交金额 + 手续费（自付 ≥ 0，手续费可由融资覆盖）。
+    此前把 USD 融资 ×rate 当账户币种金额再相减，方向反了 → 全融资买入显示巨额负数并误报。 */
 const selfPaid = computed(() => {
   const m = +form.margin || 0;
   if (!(m > 0)) return 0;
-  const rate = +form.fx || 0;
-  const mAcct = form.marginCurrency === 'USD' ? m * rate : m;      // 融资（账户币种）
-  const acctCur = accountCurrency.value, astCur = props.asset?.currency || 'CNY';
-  const gAcct = astCur === acctCur ? grossAmount.value
-    : (astCur === 'USD' ? grossAmount.value * rate : grossAmount.value / rate);
-  return +(gAcct - mAcct).toFixed(2);
+  const rate = +form.fx > 0 ? +form.fx : rateFallback();
+  const astCur = props.asset?.currency || 'CNY';
+  const toInput = (v, fromCcy) => {
+    if (fromCcy === form.marginCurrency) return v;               // 同币种无需换算
+    return fromCcy === 'USD' ? v * rate : v / rate;              // USD→CNY 乘，CNY→USD 除
+  };
+  const fee = +form.fee || 0;
+  return +(toInput(grossAmount.value, astCur) + toInput(fee, feeCurrency.value) - m).toFixed(2);
 });
 const fmtMoney = v => (Math.round((+v || 0) * 100) / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 /** 账户是否券商（仅券商可融资） */

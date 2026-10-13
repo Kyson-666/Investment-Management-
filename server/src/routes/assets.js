@@ -110,6 +110,12 @@ router.post('/', asyncHandler(async (req, res) => {
   if (opening && !isStock && !(unitPrice > 0)) unitPrice = opening.price;
   if (opening && !isStock && !(marketValue > 0)) marketValue = opening.qty * unitPrice;
 
+  /* 期初建仓汇率必须按「建仓日期」取资产币种→CNY 的实际汇率（CNY 恒 1）；
+     提前计算供融资校验使用——融资(marginCNY) 与建仓成本(账户币种) 必须同口径比较，
+     此前裸比导致 USD 全融资建仓被误判「融资超过成本」。 */
+  const openFx = opening ? (currency === 'CNY' ? 1 : currentFx(opening.date)) : 1;
+  const fxSafe = (isFinite(openFx) && openFx > 0) ? openFx : 1;
+
   const marginCNY = parseMargin(b, account, opening ? opening.date : null);
   if (typeof marginCNY === 'string') return badRequest(res, marginCNY);
   /* 融资额不得超过期初建仓成本（成本请填「自付 + 融资」的总额） */
@@ -117,8 +123,8 @@ router.post('/', asyncHandler(async (req, res) => {
       const oCost = (+opening.price > 0 && +opening.qty > 0)   // parseOpening 返回 price（非 costPrice）
         ? +opening.price * +opening.qty
       : (+opening.amount > 0 ? +opening.amount : 0);
-    if (oCost > 0 && marginCNY > oCost + 1e-6) {
-      return badRequest(res, `融资（¥${marginCNY}）不能超过期初建仓成本（¥${oCost.toFixed(2)}）—— 成本请填「自付 + 融资」的总额`);
+    if (oCost > 0 && marginCNY > oCost * fxSafe + 1e-6) {
+      return badRequest(res, `融资（¥${marginCNY}）不能超过期初建仓成本（¥${+(oCost * fxSafe).toFixed(2)}）—— 成本请填「自付 + 融资」的总额`);
     }
   }
 
@@ -133,10 +139,7 @@ router.post('/', asyncHandler(async (req, res) => {
       null, now());
 
   if (opening) {
-    /* 期初建仓的汇率必须按「建仓日期」取资产币种→CNY 的实际汇率，
-       此前硬编码为 1，会让非人民币资产的期初成本被当成 1:1 折算、严重低估。 */
-    const openFx = currency === 'CNY' ? 1 : currentFx(opening.date);
-    const fxSafe = (isFinite(openFx) && openFx > 0) ? openFx : 1;
+    /* openFx/fxSafe 已在融资校验前按建仓日期算好（CNY 恒 1，USD 用建仓日生效汇率） */
     getDb().prepare(`INSERT INTO event
       (user_id,asset_id,date,kind,side,qty,price,amount,ratio,fee,fx,is_t,note,created_at)
       VALUES (?,?,?,?,?,?,?,?,NULL,0,?,0,?,?)`)

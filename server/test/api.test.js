@@ -587,3 +587,46 @@ test('资产编辑：手改价格标记 manual，仅改名/改预警不标记', 
 
   await api('DELETE', `/api/accounts/${acc.json.id}`, adminToken);
 });
+
+/* ---------------- 融资校验：币种口径（USD 全融资买入回归，v1.0.5 后修复） ---------------- */
+test('融资校验同币种口径：USD 全融资买入（含手续费）可通过，超限报 CNY 金额', async () => {
+  const acc = await api('POST', '/api/accounts', adminToken, { name: '融资币种账户', kind: 'broker', currency: 'USD' });
+  const a = await api('POST', '/api/assets', adminToken, {
+    name: '融资回归美股', type: 'stock', market: 'US', currency: 'USD', accountId: acc.json.id, price: 50,
+  });
+  assert.equal(a.status, 201);
+
+  /* 上限 = (200×53 + 1) × 6.6928 = 70,950.37 CNY；用户场景：全融资（含 1 USD 手续费）应通过 */
+  const ok = await api('POST', '/api/events', adminToken, {
+    assetId: a.json.id, date: today, side: 'buy', qty: 200, price: 53, fee: 1, fx: 6.6928, marginCNY: 70950.37,
+  });
+  assert.equal(ok.status, 201, `全融资买入应通过：${JSON.stringify(ok.json)}`);
+
+  /* 超限 → 400，错误文案为 CNY 口径（此前误用 USD 裸值 10,600 比较，永远误报） */
+  const bad = await api('POST', '/api/events', adminToken, {
+    assetId: a.json.id, date: today, side: 'buy', qty: 200, price: 53, fee: 1, fx: 6.6928, marginCNY: 70953,
+  });
+  assert.equal(bad.status, 400);
+  assert.ok(bad.json.error.includes('70950.37'), `错误文案应含 CNY 上限 70950.37：${bad.json.error}`);
+
+  await api('DELETE', `/api/accounts/${acc.json.id}`, adminToken);
+});
+
+test('期初建仓融资：USD 资产按建仓日汇率同口径校验（此前裸比 USD 误报）', async () => {
+  const acc = await api('POST', '/api/accounts', adminToken, { name: '建仓融资账户', kind: 'broker', currency: 'USD' });
+  /* 建仓日 2026-01-01 的汇率 7.2 已由「期初建仓汇率回归」用例写入：上限 = 100×10×7.2 = 7,200 CNY */
+  const ok = await api('POST', '/api/assets', adminToken, {
+    name: '建仓融资回归股', type: 'stock', market: 'US', currency: 'USD', accountId: acc.json.id, price: 12,
+    opening: { qty: 100, costPrice: 10, date: '2026-01-01' }, margin: 7200, marginCurrency: 'CNY',
+  });
+  assert.equal(ok.status, 201, `全融资建仓应通过：${JSON.stringify(ok.json)}`);
+
+  const bad = await api('POST', '/api/assets', adminToken, {
+    name: '建仓融资超限', type: 'stock', market: 'US', currency: 'USD', accountId: acc.json.id, price: 12,
+    opening: { qty: 100, costPrice: 10, date: '2026-01-01' }, margin: 7300, marginCurrency: 'CNY',
+  });
+  assert.equal(bad.status, 400);
+  assert.ok(bad.json.error.includes('¥7200'), `错误文案应含 CNY 上限：${bad.json.error}`);
+
+  await api('DELETE', `/api/accounts/${acc.json.id}`, adminToken);
+});
