@@ -21,60 +21,78 @@ function scope(S, accountId) {
 }
 
 
-/** 一次性返回前端所需的全部派生数据 */
-function computeAll(userId, accountId) {
+/**
+ * 一次性返回前端所需的派生数据。
+ * @param {number} userId
+ * @param {string} [accountId]
+ * @param {object} [options] {sections?: string[]} 只计算指定域；缺省=全量。
+ *   可用域：kpis / performance / benchmark / allocation / concentration /
+ *           alerts / tax / reports / accounts / aggregation
+ */
+function computeAll(userId, accountId, options) {
+  const sections = options && Array.isArray(options.sections) ? new Set(options.sections) : null;
+  const want = k => !sections || sections.has(k);
   const S = buildState(userId);
   const settings = S.fullSettings;
   const id = accountId ? String(accountId) : null;
-  const opts = id ? { accountId: id } : {};
+  const opts = {};
+  if (id) opts.accountId = id;
+  if (options && options.asOf) opts.asOf = String(options.asOf).slice(0, 10);
   const S2 = scope(S, id);
 
+  /* summary / cash / days 是多数模块的公共输入，始终计算 */
   const s = Calc.summary(S, opts);
-  const days = Calc.holdingDays(S, opts);
-  const xirr = Calc.portfolioXirr(S, opts);
-  const twr = Calc.twr(S, opts);
-  const simpleAnn = Calc.annualized(s.accountRate, days);   // 与累计收益率（账户口径）配对
-  const bm = Calc.benchmark(S, S.benchSeries, opts);
-  const alloc = Calc.allocation(S, settings.allocTargets, opts);
-  const concentration = Calc.concentration(S, { ...opts, warnSingle: settings.warnSingle, warnTop5: settings.warnTop5 });
-  const alerts = Calc.checkAlerts(S2);
-  const tax = Calc.taxEstimate(S, settings.taxRules, opts);
-  const months = Calc.monthRows(S, opts);
-  const years = Calc.yearRows(S, opts);
   const cash = Calc.accountCash(S, opts);
-  const accounts = Calc.accountSummary(S2);
-  const aggregation = Calc.securityAggregation(S2);
+  const days = Calc.holdingDays(S, opts);
 
-  // 税务：按市场按年度的资本利得明细（修复原型用汇总值驱动年度表的缺陷）
-  const gainsByYear = Calc.realizedGainsByYear(S, opts);
-  const capGainRows = ['CN', 'US'].flatMap(mk => Object.keys(gainsByYear[mk]).sort().map(y => {
-    const gain = gainsByYear[mk][y];
-    const rate = mk === 'US' ? settings.taxRules.usCapGain : settings.taxRules.cnCapGain;
-    return { market: mk, year: y, gain, tax: round2(Math.max(0, gain) * rate) };
-  }));
+  const needPerf = want('performance') || want('kpis');
+  const xirr = needPerf ? Calc.portfolioXirr(S, opts) : null;
+  const twr = needPerf ? Calc.twr(S, opts) : null;
+  const simpleAnn = needPerf ? Calc.annualized(s.rate, days) : null;
+  const bm = (want('benchmark') || want('performance') || want('kpis'))
+    ? Calc.benchmark(S, S.benchSeries, opts) : null;
+  const alloc = want('allocation') ? Calc.allocation(S, settings.allocTargets, opts) : null;
+  const concentration = (want('concentration') || want('alerts') || want('kpis'))
+    ? Calc.concentration(S, { ...opts, warnSingle: settings.warnSingle, warnTop5: settings.warnTop5 })
+    : null;
+  const alerts = (want('alerts') || want('kpis')) ? Calc.checkAlerts(S2, opts) : [];
+  const tax = want('tax') ? Calc.taxEstimate(S, settings.taxRules, opts) : null;
+  const months = (want('reports') || want('kpis')) ? Calc.monthRows(S, opts) : [];
+  const years = (want('reports') || want('kpis')) ? Calc.yearRows(S, opts) : [];
+  const accounts = want('accounts') ? Calc.accountSummary(S2, opts) : null;
+  const aggregation = want('aggregation') ? Calc.securityAggregation(S2, opts) : [];
+
+  // 税务：按市场按年度的资本利得明细
+  const gainsByYear = want('tax') ? Calc.realizedGainsByYear(S, opts) : null;
+  const capGainRows = gainsByYear
+    ? ['CN', 'US'].flatMap(mk => Object.keys(gainsByYear[mk]).sort().map(y => {
+      const gain = gainsByYear[mk][y];
+      const rate = mk === 'US' ? settings.taxRules.usCapGain : settings.taxRules.cnCapGain;
+      return { market: mk, year: y, gain, tax: round2(Math.max(0, gain) * rate) };
+    }))
+    : [];
 
   /* ---------- 本年收益（1/1 ~ 12/31）----------
-   * 用「净资产法」计算，**不依赖月末快照**，与「累计收益」卡片的浮动口径天然一致：
-   *   当前净资产 = 持仓市值 + 账户现金 − 融资金额
-   *   年初净资产 = 上一年 12/31 的（持仓市值 − 融资金额）；无该快照时按 0（视为年初无持仓）
-   *   本年收益   = 当前净资产 − 年初净资产 − 本年净入金      ← 净资产变化剔除当年净投入
+   * 实际实现（与下方代码一致，别再按“净资产法”理解）：
    *   本年已实现 = 当年 已实现 + 分红 + 利息（按月汇总）
-   *   本年浮动   = 本年收益 − 本年已实现
-   *   年投入本金 = 年初净资产；若为 0 则退化为「本年净入金」
+   *   年初浮动   = 上年 12/31 的（持仓市值 − 剩余持仓成本）；无快照/无成本时按 0
+   *   本年浮动   = 累计浮动 − 年初浮动
+   *   本年收益   = 本年已实现 + 本年浮动
+   *   年投入本金 = 上年 12/31 的（持仓市值 − 融资）；缺失时退化为「本年净入金」
    *   年收益率   = 本年收益 ÷ 年投入本金
+   * 依赖：monthRows 的已实现、costBasisAt 的期初成本（已支持 FIFO/分红冲减）。
    */
   const nowYear = Calc.TODAY().slice(0, 4);
-  const yRow = years.find(y => y.year === nowYear);
+  const yRow = want('kpis') ? years.find(y => y.year === nowYear) : null;
   const yearReal = yRow ? yRow.real : 0;
   const yearDeposit = yRow ? yRow.netDeposit : 0;
 
   const prevYear = String(Number(nowYear) - 1);
-  const prevDecSnap = (S.snapshots || []).find(x => x.month === `${prevYear}-12`);
+  const prevDecSnap = want('kpis') ? (S.snapshots || []).find(x => x.month === `${prevYear}-12`) : null;
 
   /* 年初（上年 12/31）的累计浮动 = 上年末快照市值 − 上年末剩余持仓成本。
-     ⚠️ 不用「净资产」口径：期初建仓不产生现金流（刻意设计），
-        净资产会把期初建仓本金重复计入，导致本年收益虚高。 */
-  const startCost = prevDecSnap ? Calc.costBasisAt(S, `${prevYear}-12-31`, opts) : 0;
+     成本重放已按当前成本法（wavg/FIFO）与分红冲减设置执行，避免与累计浮动不同源。 */
+  const startCost = (want('kpis') && prevDecSnap) ? Calc.costBasisAt(S, `${prevYear}-12-31`, opts) : 0;
   /* 守卫：仅当上年末**确实存在持仓成本**时才认可「年初浮动」。
      否则说明该快照与持仓记录不一致（例如持仓是今年才录入的期初建仓），
      此时把年初浮动视为 0，避免本年浮动被算成负数巨值。 */
@@ -82,8 +100,7 @@ function computeAll(userId, accountId) {
     ? round2((prevDecSnap.total || 0) - startCost)
     : 0;
 
-  /* 本年浮动 = 累计浮动 − 年初累计浮动（无需月末快照；无上年末快照时年初浮动为 0） */
-  const yearFloat = round2(s.unreal - yearStartFloat);
+  const yearFloat = want('kpis') ? round2(s.unreal - yearStartFloat) : 0;
   const yearProfit = round2(yearReal + yearFloat);
 
   let yearBaseInvest = null, yearBaseSource = null;
@@ -99,7 +116,9 @@ function computeAll(userId, accountId) {
   if (yearBaseInvest !== null && yearBaseInvest <= 1e-9) yearBaseInvest = null;
   const yearRate = yearBaseInvest ? yearProfit / yearBaseInvest : null;
 
-  const holdings = s.rows.map(({ a, r, mv, profit }) => ({ asset: a, calc: r, mvCNY: mv, profitCNY: profit }));
+  const holdings = want('kpis')
+    ? s.rows.map(({ a, r, mv, profit }) => ({ asset: a, calc: r, mvCNY: mv, profitCNY: profit }))
+    : [];
 
   /* ---------- 数据一致性检测 ----------
    * 「期初建仓本金」与「入金」是本金来源的两种**互斥**表达：
@@ -110,7 +129,8 @@ function computeAll(userId, accountId) {
    * 这里只做**提示**（不自动改数），并给出两条修正路径。
    */
   const warnings = [];
-  if (s.openingCost > 0 && s.netDeposit > 0) {
+  if (!want('kpis')) { /* 非 KPI 请求不做一致性提示，避免无谓计算 */ }
+  else if (s.openingCost > 0 && s.netDeposit > 0) {
     const dup = round2(Math.min(s.openingCost, s.netDeposit));
     warnings.push({
       code: 'duplicate_opening_deposit',
@@ -119,19 +139,18 @@ function computeAll(userId, accountId) {
       openingCost: s.openingCost,
       netDeposit: s.netDeposit,
       mightDup: dup,
-      /* ⚠️ 注意：**不可**建议「删除入金」—— 按 v6 口径 累计投入 = 净入金，
-         删掉入金会让累计投入归零、收益失真（实测会变成负数）。
-         唯一正确的修法是把期初建仓改为买入/申购事件（保留入金）。 */
+      /* 累计投入现已包含期初建仓，删除入金**不会**让累计投入归零；
+         但仍不建议删除，因为出金/入金是 XIRR 的外部现金流。 */
       msg: `同时存在「期初建仓本金 ¥${s.openingCost}」与「净入金 ¥${s.netDeposit}」。`
-        + `累计投入只按净入金计（不受影响），但**账户现金**会出现并不存在的余额`
+        + `累计投入已包含期初建仓，不受影响；但**账户现金**会出现并不存在的余额`
         + `（约 ¥${dup}，这笔钱其实已变成持仓）。`
         + `若是同一笔钱：请把该笔「期初建仓」改为等额的**买入/申购**事件（保留入金），`
-        + `**切勿删除入金**（会导致累计投入归零、收益失真）。`
+        + `这样现金与持仓才对得上。`
         + `若入金是另外新转入的钱，可点「不再提示」。`,
     });
   }
   /* 现金为负：需排除「融资买入」造成的正常负现金 —— 融资本质上就是这笔负现金 */
-  if (s.cash < -0.01 && s.cash < -(s.marginTotal || 0) - 1) {
+  if (want('kpis') && s.cash < -0.01 && s.cash < -(s.marginTotal || 0) - 1) {
     warnings.push({
       code: 'negative_cash',
       level: 'warn',
@@ -142,36 +161,59 @@ function computeAll(userId, accountId) {
         + `（提示：买入/申购不要再记入金——同一笔钱只在「入金」时算一次外部流入。）`,
     });
   }
-  if (s.openingCost > 0 && s.netDeposit <= 0) {
+  if (want('kpis') && s.openingCost > 0 && s.netDeposit <= 0) {
     warnings.push({
       code: 'opening_without_deposit',
       level: 'warn',
-      title: '期初建仓缺少对应入金',
+      title: '期初建仓未体现在账户现金',
       openingCost: s.openingCost,
-      msg: `检测到期初建仓本金 ¥${s.openingCost}，但没有对应入金记录。`
-        + `按当前口径「累计投入 = 净入金」，这笔本金**未计入累计投入**，`
-        + `因此「累计投入」会比实际少算约 ¥${s.openingCost}。`
-        + `请到「出入金」页补录一笔等额入金（若这笔钱是记账前就投入的，也需补录以体现本金）。`,
+      msg: `检测到期初建仓本金 ¥${s.openingCost}。`
+        + `该本金**已计入累计投入**，因此累计收益率不受影响；`
+        + `但它发生在记账开始前，账户现金不会包含这笔钱，属正常现象。`
+        + `若你希望账户现金也体现这笔本金，请补录一笔等额入金，并把期初建仓改为买入/申购。`,
     });
   }
+  /* 超卖：引擎已钳制，不产生负市值；这里提示用户修正历史流水 */
+  if (want('kpis')) {
+    const bad = s.rows.filter(x => x.r.oversold).map(x => x.a.name);
+    if (bad.length) {
+      warnings.push({
+        code: 'oversold_events', level: 'warn', title: '存在超卖/超额赎回记录',
+        msg: `以下资产的历史流水卖出/赎回份额超过当时持仓，引擎已按可用份额钳制：${bad.join('、')}。`
+          + `请检查并修正对应流水，否则已实现收益与成本可能偏差。`,
+      });
+    }
+    if (Math.abs(s.identityDiff || 0) > 0.01) {
+      warnings.push({
+        code: 'identity_mismatch', level: 'warn', title: '收益恒等式不一致',
+        msg: `累计收益与「持仓市值 + 现金 − 融资 − 累计投入」相差 ¥${s.identityDiff}。`
+          + `通常意味着存在未记录的期初持仓或异常流水，请核对资产与出入金。`,
+      });
+    }
+  }
 
-  const kpis = {
-    /* ── 单一口径三件套（v6）── */
-    invest: s.invest,                    // 累计投入 = 净入金（入金 − 出金）
-    profit: s.profit,                    // 累计收益（唯一口径，不再分账户/持仓）
-    rate: s.rate,                        // 收益率 = 累计收益 / 累计投入
+  const kpis = !want('kpis') ? null : {
+    /* ── 单一口径三件套 ── */
+    invest: s.invest,                    // 累计投入 = 净入金 + 期初建仓本金
+    profit: s.profit,                    // 累计收益（唯一口径）
+    rate: s.rate,                        // 收益率 = 累计收益 / 累计投入（分母<=0 时为 null）
     /* ── 持仓构成（用于卡片副标题）── */
     mv: s.mv,
-    real: s.real,                        // 已实现（含分红、利息）
+    real: s.real,                        // 已实现（含分红、利息、现金校准）
+    cashAdjust: s.cashAdjust,             // 现金校准（正=盘盈，负=盘亏）
     unreal: s.unreal,                    // 浮动
     cashIncome: s.cashIncome,
-    /* ── 手续费与融资（v7）── */
+    /* ── 手续费与融资 ── */
     feeTotal: s.feeTotal,                // 累计手续费（含税，所有类型）
     marginTotal: s.marginTotal,          // 融资合计（欠券商）
     netValueTotal: s.netValueTotal,      // 实际净值合计 = 持仓市值 − 融资
     selfCostTotal: s.selfCostTotal,      // 自付本金合计 = 持仓成本 − 融资
     /* ── 诊断 / 出入金页 ── */
-    cash: s.cash,                        // 账户现金余额（融资买入时会为负，属正常）
+    cash: s.cash,                        // 账户现金（发生日汇率；融资买入时会为负，属正常）
+    cashCurrent: s.cashCurrent,          // 账户现金按当前汇率重估（仅展示）
+    cashFxGain: s.cashFxGain,            // 现金汇兑差额（未计入累计收益）
+    netWorth: s.netWorth,                // 持仓市值 + 现金 − 融资
+    identityDiff: s.identityDiff,        // 恒等式校验：profit − (netWorth − invest)
     netDeposit: s.netDeposit,
     openingCost: s.openingCost,
     netInvest: s.netInvest,
@@ -184,8 +226,8 @@ function computeAll(userId, accountId) {
     benchmarkCode: settings.benchmarkCode,
     yearProfit,
     yearReal,
-    yearFloat,                            // 本年浮动收益（无快照时为 null）
-    yearBaseInvest,                       // 年投入本金 = 上年 12/31 净资产（缺失时退化为本年净入金）
+    yearFloat,                            // 本年浮动 = 累计浮动 − 年初浮动（无快照时等于累计浮动）
+    yearBaseInvest,                       // 年投入本金 = 上年 12/31 的（持仓市值 − 融资）
     yearBaseSource,                       // 'prev-year-end' | 'current-year-deposit'
     yearRate,                             // 年收益率 = 本年收益 ÷ 年投入本金
     fxCurrent: Calc.currentFx(S),
@@ -198,19 +240,20 @@ function computeAll(userId, accountId) {
     holdings,
     accounts,
     aggregation,
-    performance: {
+    performance: (want('performance') || want('kpis')) ? {
       xirr: xirr, twr: twr, simpleAnnualized: simpleAnn,
       cumulativeRate: s.rate, holdingDays: days,
       invest: s.invest, profit: s.profit,
       real: s.real, unreal: s.unreal, mv: s.mv, cash: s.cash,
+      cashCurrent: s.cashCurrent, cashFxGain: s.cashFxGain,
       netDeposit: s.netDeposit, openingCost: s.openingCost,
       netInvest: s.netInvest, buyTotal: s.buyTotal,
-    },
+    } : null,
     benchmark: bm,
     allocation: alloc,
     concentration,
     alerts,
-    tax: { ...tax, capGainRows },
+    tax: tax ? { ...tax, capGainRows } : null,
     reports: { months, years },
     cash,
   };

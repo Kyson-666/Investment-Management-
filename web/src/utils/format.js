@@ -49,7 +49,10 @@ export function signClass(n) {
 }
 
 export function todayStr() {
-  return new Date().toISOString().slice(0, 10);
+  /* 本地日期：toISOString 在东八区 00:00–08:00 会退回前一天 */
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 export function currentMonth() {
   return todayStr().slice(0, 7);

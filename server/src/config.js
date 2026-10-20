@@ -61,4 +61,12 @@ function ensureDirs() {
   fs.mkdirSync(config.BACKUP_DIR, { recursive: true });
 }
 
+/* 生产环境拒绝默认/过短 JWT 密钥：默认 docker-compose 也能启动是审计中的 P0 风险 */
+if (config.NODE_ENV === 'production') {
+  const secret = String(process.env.JWT_SECRET || '');
+  if (!secret || secret.length < 32 || /change|secret|please/i.test(secret)) {
+    throw new Error('[config] 生产环境必须设置至少 32 位的随机 JWT_SECRET（当前为默认值或过短）');
+  }
+}
+
 module.exports = { config, ensureDirs };

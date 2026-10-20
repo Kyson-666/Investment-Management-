@@ -95,8 +95,10 @@
         <div class="form-tip" style="margin:-6px 0 10px 4px;line-height:1.6">
           若这个资产在<b>开始记账前就已持有</b>，在这里填当初的份额与成本，系统会据此计算已有盈亏。
           <br>
-          ⚠️ <b>此处的本金不会自动计入「累计投入」</b>（累计投入只按净入金计算）。
-          请另到「出入金」页补录一笔<b>等额入金</b>，否则系统会提示「期初建仓缺少对应入金」。
+          ⚠️ 期初建仓本金<b>会计入「累计投入」</b>（累计投入 = 净入金 + 期初建仓）。
+          它发生在记账开始前，<b>不产生现金流</b>，所以账户现金不会包含这笔钱，属正常现象。
+          <br>
+          若你希望账户现金也体现这笔本金，请到「出入金」页补录一笔<b>等额入金</b>，并把这条期初建仓改为买入/申购。
           <br>
           若这笔仓位是<b>融资买入</b>的，期初成本请填「自付 + 融资」的总额。
         </div>
@@ -142,7 +144,7 @@
 import { reactive, ref, watch, computed } from 'vue';
 import { ElMessage } from 'element-plus';
 import { assetsApi, fxApi } from '../api';
-import { ACCOUNT_KIND_LABEL } from '../utils/format';
+import { ACCOUNT_KIND_LABEL, todayStr } from '../utils/format';
 import { ccyName } from '../utils/format';
 import { usePortfolioStore } from '../stores/portfolio';
 
@@ -262,7 +264,7 @@ function reset() {
       openingCurrency: 'CNY',
     });
   } else {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayStr();
     Object.assign(form, {
       name: '', code: '', accountId: props.accounts[0]?.id || '', type: 'stock',
       market: 'CN', currency: 'CNY',
@@ -321,11 +323,12 @@ async function save() {
       if (!(unit > 0)) return ElMessage.warning(valueHint());
       const payload = { name: form.name, code: form.code };
       if (isStock.value) payload.price = unit; else payload.unitPrice = unit;
-      if (isBroker.value && +form.margin > 0) {
-        payload.margin = +form.margin;
+      if (isBroker.value) {
+        /* 始终提交（含 0）：否则用户把融资改成 0 时会被“缺省=保留”吞掉 */
+        payload.margin = +form.margin || 0;
         payload.marginCurrency = form.marginCurrency;
-        if (form.marginCurrency === 'USD') {
-          const r = +form.fx || 0;
+        if (form.marginCurrency === 'USD' && +form.margin > 0) {
+          const r = +form.rate || 0;          // 弹窗字段是 rate，不是 fx
           if (!(r > 0)) return ElMessage.warning('按 USD 录入融资时请填写有效汇率');
           payload.marginFx = r;
         }

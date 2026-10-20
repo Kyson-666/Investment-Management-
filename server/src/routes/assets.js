@@ -6,6 +6,9 @@ const { getDb, now } = require('../db');
 const { authRequired } = require('../middleware/auth');
 const { asyncHandler, badRequest, notFound, ownedRow } = require('../middleware/helpers');
 const { currentFx } = require('../services/fx');
+const { localDate } = require('../time');
+const prices = require('../services/prices');
+const archive = require('../services/archive');
 
 const router = express.Router();
 router.use(authRequired);
@@ -26,8 +29,18 @@ function mapRow(a) {
   };
 }
 
-function validateAlerts(al) {
-  if (al === null || al === undefined) return null;
+/** 代码格式校验（可选字段；填了就必须符合对应市场） */
+function validateCode(type, market, code) {
+  if (!code) return null;
+  if (type === 'stock') {
+    if (market === 'CN') return /^\d{6}$/.test(code) ? null : 'A股代码应为 6 位数字（如 600519）';
+    return /^[A-Za-z][A-Za-z.]{0,9}$/.test(code) ? null : '美股代码应为字母，可含点（如 AAPL / BRK.B）';
+  }
+  if (type === 'fund') return /^\d{6}$/.test(code) ? null : '基金代码应为 6 位数字';
+  return null;
+}
+
+function validateAlerts(al) {  if (al === null || al === undefined) return null;
   if (typeof al !== 'object') return '预警参数格式错误';
   const keys = ['takeProfitPrice', 'stopLossPrice', 'takeProfitRate', 'stopLossRate'];
   const out = {};
@@ -51,7 +64,7 @@ function parseMargin(body, account, dateStr) {
   if (account.kind !== 'broker') return '仅券商账户支持融资';
   const inCur = ['CNY', 'USD'].includes(body.marginCurrency) ? body.marginCurrency : 'CNY';
   if (inCur === 'CNY') return +raw.toFixed(2);
-  const rate = (+body.marginFx > 0) ? +body.marginFx : currentFx(dateStr || now().slice(0, 10));
+  const rate = (+body.marginFx > 0) ? +body.marginFx : currentFx(dateStr || localDate());
   if (!isFinite(rate) || rate <= 0) return '汇率非法，无法换算融资';
   return +(raw * rate).toFixed(2);      // USD → CNY
 }
@@ -68,7 +81,7 @@ function parseOpening(o) {
   if (price === null && amount === null) return '请填写期初成本单价或期初投入本金';
   if (price === null) price = amount / qty;              // 由本金反推成本单价
   if (amount === null) amount = qty * price;
-  const date = String(o.date || '').slice(0, 10) || now().slice(0, 10);
+  const date = String(o.date || '').slice(0, 10) || localDate();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return '期初建仓日期格式应为 YYYY-MM-DD';
   return { qty, price, amount, date };
 }
@@ -95,6 +108,9 @@ router.post('/', asyncHandler(async (req, res) => {
     market = b.market;
   }
   const isStock = type === 'stock';
+  const code = String(b.code || '').trim();
+  const codeErr = validateCode(type, market, code);
+  if (codeErr) return badRequest(res, codeErr);
   const price = Number(b.price) || 0;
   let unitPrice = Number(b.unitPrice) || 0;
   let marketValue = Number(b.marketValue) || 0;
@@ -131,12 +147,16 @@ router.post('/', asyncHandler(async (req, res) => {
   const info = getDb().prepare(`INSERT INTO asset
     (user_id,account_id,name,code,market,type,currency,price,market_value,unit_price,margin_cny,alerts_json,created_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(req.user.id, account.id, name, String(b.code || ''), market, type, currency,
+    .run(req.user.id, account.id, name, code, market, type, currency,
       isStock ? price : 0,
       isStock ? 0 : marketValue,
       isStock ? 0 : unitPrice,
       marginCNY,
       null, now());
+
+  /* 记录当前单价/净值，供定投与历史估值使用 */
+  const createdPx = isStock ? price : unitPrice;
+  if (createdPx > 0) prices.recordPrice(getDb(), info.lastInsertRowid, localDate(), createdPx, 'manual');
 
   if (opening) {
     /* openFx/fxSafe 已在融资校验前按建仓日期算好（CNY 恒 1，USD 用建仓日生效汇率） */
@@ -157,6 +177,12 @@ router.put('/:id', asyncHandler(async (req, res) => {
   const name = b.name !== undefined ? String(b.name).trim() : row.name;
   if (!name) return badRequest(res, '资产名称不能为空');
   const code = b.code !== undefined ? String(b.code) : row.code;
+  const codeErr = validateCode(row.type, row.market, code);
+  if (codeErr) return badRequest(res, codeErr);
+  /* 非股票市值由“份额 × 单位净值”决定，单独改市值不会生效 → 明确拒绝，避免静默无效 */
+  if (row.type !== 'stock' && b.marketValue !== undefined && b.unitPrice === undefined) {
+    return badRequest(res, '非股票资产请通过单位净值修改市值（市值 = 份额 × 单位净值）');
+  }
   let price = row.price, mv = row.market_value, up = row.unit_price;
   if (b.price !== undefined) price = Number(b.price) || 0;
   if (b.marketValue !== undefined) mv = Number(b.marketValue) || 0;
@@ -185,14 +211,18 @@ router.put('/:id', asyncHandler(async (req, res) => {
      按值比较判断（弹窗整体提交时改名/改预警不会误标）；手改后清空行情日期。 */
   let priceSource = row.price_source || null;
   let priceDate = row.price_date || null;
+  /* 代码变了，旧价格不再对应当前标的 → 清空自动同步标记，等待新代码报价 */
+  if (code !== row.code) { priceSource = null; priceDate = null; }
   const priceTouched = row.type === 'stock'
     ? (b.price !== undefined && Number(b.price) !== row.price)
-    : ((b.unitPrice !== undefined && Number(b.unitPrice) !== row.unit_price)
-     || (b.marketValue !== undefined && Number(b.marketValue) !== row.market_value));
+    : (b.unitPrice !== undefined && Number(b.unitPrice) !== row.unit_price);
   if (priceTouched) { priceSource = 'manual'; priceDate = null; }
 
   getDb().prepare('UPDATE asset SET name=?,code=?,price=?,market_value=?,unit_price=?,margin_cny=?,alerts_json=?,price_source=?,price_date=? WHERE id=? AND user_id=?')
     .run(name, code, price, mv, up, margin, alertsJson, priceSource, priceDate, row.id, req.user.id);
+  if (priceTouched) {
+    prices.recordPrice(getDb(), row.id, localDate(), row.type === 'stock' ? price : up, 'manual');
+  }
   res.json(mapRow(ownedRow(getDb(), 'asset', row.id, req.user.id)));
 }));
 
@@ -210,8 +240,14 @@ router.put('/:id/alerts', asyncHandler(async (req, res) => {
 router.delete('/:id', (req, res) => {
   const row = ownedRow(getDb(), 'asset', req.params.id, req.user.id);
   if (!row) return notFound(res);
-  getDb().prepare('DELETE FROM asset WHERE id=? AND user_id=?').run(row.id, req.user.id);
-  res.json({ ok: true });
+  const db = getDb();
+  let archivedId = null;
+  db.transaction(() => {
+    const ar = archive.archiveAsset(db, req.user.id, row.id);
+    archivedId = ar ? String(ar.id) : null;
+    db.prepare('DELETE FROM asset WHERE id=? AND user_id=?').run(row.id, req.user.id);
+  })();
+  res.json({ ok: true, archivedId });
 });
 
 module.exports = router;

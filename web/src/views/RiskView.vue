@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <h2>风险监控</h2>
-        <div class="sub">集中度监控（单标的 / 前5大 / 股票类占比）、止损止盈预警与阈值设置</div>
+        <div class="sub">证券持仓的集中度监控（单标的 / 前5大 / 股票类占比，不含现金）、止损止盈预警与阈值设置</div>
       </div>
       <div class="actions">
         <el-button type="primary" :loading="saving" @click="saveThresholds">保存阈值</el-button>
@@ -20,9 +20,9 @@
       <div class="kpi"><div class="label">股票类占比</div>
         <div class="val num">{{ pct(stockPct) }}</div>
         <div class="sub">权益资产风险敞口</div></div>
-      <div class="kpi"><div class="label">价格预警数</div>
+      <div class="kpi"><div class="label">预警数</div>
         <div class="val num" :class="priceAlerts.length ? 'down' : ''">{{ priceAlerts.length }}</div>
-        <div class="sub">止盈 / 止损触发</div></div>
+        <div class="sub">止盈/止损（价格或持仓浮盈率）</div></div>
     </div>
 
     <div class="grid-sidebar">
@@ -61,10 +61,13 @@
             <el-table-column label="止损价" width="100" align="right">
               <template #default="{ row }">{{ row.sl ? money(row.sl, 4) : '—' }}</template>
             </el-table-column>
+            <el-table-column label="持仓浮盈率" width="110" align="right">
+              <template #default="{ row }"><span :class="signClass(row.rate)">{{ row.rate == null ? '—' : signedPct(row.rate) }}</span></template>
+            </el-table-column>
             <el-table-column label="状态" min-width="160">
               <template #default="{ row }">
-                <el-tag v-if="row.tp && row.current >= row.tp" type="danger" size="small" effect="plain">已达止盈，可止盈</el-tag>
-                <el-tag v-else-if="row.sl && row.current <= row.sl" type="info" size="small" effect="plain">已破止损，建议止损</el-tag>
+                <el-tag v-if="(row.tp && row.current >= row.tp) || (row.tpRate && row.rate != null && row.rate >= row.tpRate)" type="danger" size="small" effect="plain">已达止盈，可止盈</el-tag>
+                <el-tag v-else-if="(row.sl && row.current <= row.sl) || (row.slRate && row.rate != null && row.rate <= -row.slRate)" type="info" size="small" effect="plain">已破止损，建议止损</el-tag>
                 <el-tag v-else type="success" size="small" effect="plain">正常持有</el-tag>
               </template>
             </el-table-column>
@@ -97,7 +100,7 @@
               <el-button type="primary" @click="saveThresholds">保存</el-button>
             </el-form-item>
           </el-form>
-          <p class="form-tip">单标的超过预警线、前5大合计超过阈值、股票类占比超过 70% 时，每日 16:00 定时检查并生成站内通知。</p>
+          <p class="form-tip">单标的超过预警线、前5大合计超过阈值、股票类占比超过 70%，或止盈/止损价、持仓浮盈率触发时，每日 16:00 扫描并生成站内通知。</p>
         </div>
       </div>
     </div>
@@ -109,7 +112,7 @@ import { reactive, computed, ref, onMounted } from 'vue';
 import { ElMessage } from 'element-plus';
 import { usePortfolioStore } from '../stores/portfolio';
 import { alertsApi, authApi } from '../api';
-import { money, pct, TYPE_LABEL, TYPE_BADGE, ccyName } from '../utils/format';
+import { money, pct, signedPct, signClass, TYPE_LABEL, TYPE_BADGE, ccyName } from '../utils/format';
 
 const store = usePortfolioStore();
 const conc = computed(() => store.d?.concentration || { list: [], top1: 0, top5: 0, byType: {}, warnSingle: 0.2, warnTop5: 0.6, alerts: [] });
@@ -143,18 +146,23 @@ function alertText(a) {
 }
 onMounted(loadAlerts);
 
-// 持仓中设置了止盈/止损价的标的；股票用最新价，其他用单位市值（份额模式）
+// 持仓中设置了止盈/止损价或收益率阈值的标的；股票用最新价，其他用单位净值
 const priceWatch = computed(() => {
   const out = [];
   for (const h of store.holdings) {
     const a = h.asset;
     const tp = a.alerts?.takeProfitPrice || 0;
     const sl = a.alerts?.stopLossPrice || 0;
-    if (!tp && !sl) continue;
+    const tpRate = a.alerts?.takeProfitRate || 0;
+    const slRate = a.alerts?.stopLossRate || 0;
+    if (!tp && !sl && !tpRate && !slRate) continue;
+    if (!(h.qty > 0)) continue;                 // 已清仓不监控
     let current = 0;
     if (a.type === 'stock') current = Number(a.price) || 0;
     else current = h.qty > 0 ? (h.mvLocal || 0) / h.qty : 0;
-    out.push({ name: a.name, current, ccy: a.currency, tp: tp || null, sl: sl || null });
+    const rate = h.costCNY > 0 ? h.unrealCNY / h.costCNY : null;
+    out.push({ name: a.name, current, ccy: a.currency, tp: tp || null, sl: sl || null,
+      tpRate: tpRate || null, slRate: slRate || null, rate });
   }
   return out;
 });

@@ -6,6 +6,7 @@ const Calc = require('../calc');
 const { authRequired } = require('../middleware/auth');
 const { asyncHandler, badRequest, notFound, ownedRow } = require('../middleware/helpers');
 const { currentFx } = require('../services/fx');
+const prices = require('../services/prices');
 
 const router = express.Router();
 router.use(authRequired);
@@ -81,30 +82,35 @@ router.post('/:id/generate', asyncHandler(async (req, res) => {
   const rows = Calc.dcaGenerate({
     startMonth: plan.start_month, months: plan.months, day: plan.day,
     amount: plan.amount, note: plan.note || '定投',
-  });
+  }, { until: Calc.TODAY() });   // 只补到今天的期次；未来期次由每日任务逐期生成
+
+  /* 用历史成交价补齐净值序列，避免“所有历史期次都按今天的净值折算” */
+  prices.backfillFromEvents(db, asset.id);
 
   const existsStmt = db.prepare('SELECT id FROM event WHERE asset_id=? AND date=? AND kind=\'invest\'');
   const insert = db.prepare(`INSERT INTO event
     (user_id,asset_id,date,kind,side,qty,price,amount,ratio,fee,fx,is_t,note,created_at)
     VALUES (?,?,?,?,NULL,?,?,?,NULL,0,?,0,?,?)`);
 
-  /* v5：非股票申购必须带份额。定投按资产当前单位净值折算份额（净值缺省 1），
-     保证「份额 × 净值 = 金额」自洽。 */
-  const nav = +asset.unit_price > 0 ? +asset.unit_price : 1;
-
   const inserted = [], skipped = [];
   const tx = db.transaction(() => {
     for (const r of rows) {
       if (existsStmt.get(asset.id, r.date)) { skipped.push(r.date); continue; }
+      /* 按发生日最近净值折算份额；无历史净值时退回当前净值并标记 estimated */
+      const hist = prices.priceAt(db, asset.id, r.date);
+      const nav = hist ? +hist.unit_price : (+asset.unit_price > 0 ? +asset.unit_price : 1);
       const fx = asset.currency === 'USD' ? currentFx(r.date) : 1;
       const qty = +((+r.amount || 0) / nav).toFixed(6);
       const info = insert.run(req.user.id, asset.id, r.date, 'invest', qty, nav, r.amount, fx,
         r.note || plan.note || '定投', now());
-      inserted.push({ id: String(info.lastInsertRowid), date: r.date, amount: r.amount, qty, fx });
+      inserted.push({ id: String(info.lastInsertRowid), date: r.date, amount: r.amount,
+        qty, fx, nav, estimated: !hist });
     }
   });
   tx();
-  res.json({ ok: true, inserted, insertedCount: inserted.length, skippedCount: skipped.length, skipped });
+  const estimatedCount = inserted.filter(x => x.estimated).length;
+  res.json({ ok: true, inserted, insertedCount: inserted.length,
+    skippedCount: skipped.length, skipped, estimatedCount });
 }));
 
 module.exports = router;

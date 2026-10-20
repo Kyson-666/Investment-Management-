@@ -1,4 +1,4 @@
-name: Publish Docker image
+name: CI / Publish Docker image
 
 # 触发：
 #   1) 推送 v*.*.* tag（标准发布路径）
@@ -7,8 +7,10 @@ name: Publish Docker image
 #    —— 每个 v*.*.* tag 都会同时打 latest，多个 tag 并发会让 latest 指向「最后完成的旧版本」。
 on:
   push:
+    branches: [main]
     tags:
       - 'v*.*.*'
+  pull_request:
   workflow_dispatch:
     inputs:
       image_tag:
@@ -17,8 +19,43 @@ on:
         default: ''
 
 jobs:
+  test:
+    name: Test & build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            web/package-lock.json
+
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Server tests + caliber gate
+        working-directory: server
+        run: npm test
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Web build
+        working-directory: web
+        run: npm run build
+
   push_to_registries:
     name: Push Docker image to registries
+    needs: test
+    # 只有 tag 或手动触发才发布；main 分支 push / PR 只跑测试
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -13,6 +13,7 @@ let db = null;
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
 
 -- 用户
 CREATE TABLE IF NOT EXISTS user (
@@ -24,7 +25,8 @@ CREATE TABLE IF NOT EXISTS user (
   status        TEXT    NOT NULL DEFAULT 'active',      -- active | disabled
   created_at    TEXT    NOT NULL,
   last_login_at TEXT,
-  settings_json TEXT    NOT NULL DEFAULT '{}'
+  settings_json TEXT    NOT NULL DEFAULT '{}',
+  token_version INTEGER NOT NULL DEFAULT 0
 );
 
 -- 邮箱验证码（登录用）
@@ -34,6 +36,7 @@ CREATE TABLE IF NOT EXISTS login_code (
   code       TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   used       INTEGER NOT NULL DEFAULT 0,
+  attempts   INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
 
@@ -91,6 +94,7 @@ CREATE TABLE IF NOT EXISTS event (
 );
 CREATE INDEX IF NOT EXISTS idx_event_asset ON event(asset_id, date);
 CREATE INDEX IF NOT EXISTS idx_event_user ON event(user_id);
+CREATE INDEX IF NOT EXISTS idx_event_user_date ON event(user_id, date);
 
 -- 汇率时间线（手动 + 自动，全局共享）
 CREATE TABLE IF NOT EXISTS fx_rate (
@@ -102,12 +106,26 @@ CREATE TABLE IF NOT EXISTS fx_rate (
   UNIQUE(date, source)
 );
 
+-- 资产单价历史（基金净值 / 股票收盘价；定投按发生日净值折算、报表按历史估值）
+CREATE TABLE IF NOT EXISTS asset_price_history (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  asset_id   INTEGER NOT NULL REFERENCES asset(id) ON DELETE CASCADE,
+  date       TEXT NOT NULL,                 -- YYYY-MM-DD
+  unit_price REAL NOT NULL,
+  source     TEXT NOT NULL DEFAULT 'manual',-- manual | auto | event
+  created_at TEXT NOT NULL,
+  UNIQUE(asset_id, date)
+);
+CREATE INDEX IF NOT EXISTS idx_price_history_asset ON asset_price_history(asset_id, date);
+
 -- 月末快照
 CREATE TABLE IF NOT EXISTS snapshot (
-  id      INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
-  month   TEXT NOT NULL,        -- YYYY-MM
-  total   REAL NOT NULL,
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+  month      TEXT NOT NULL,        -- YYYY-MM
+  total      REAL NOT NULL,
+  source     TEXT NOT NULL DEFAULT 'manual',  -- manual | auto | derived
+  derived_at TEXT,
   UNIQUE(user_id, month)
 );
 
@@ -127,14 +145,20 @@ CREATE TABLE IF NOT EXISTS cash_flow (
   user_id        INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
   account_id     INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
   date           TEXT NOT NULL,
-  kind           TEXT NOT NULL,     -- deposit | withdraw
-  amount         REAL NOT NULL,     -- 【账户币种】金额（换算后）
+  kind           TEXT NOT NULL,     -- deposit | withdraw | transfer | adjust
+  amount         REAL NOT NULL,     -- 【账户币种】金额（换算后；adjust 可为负）
   fx             REAL NOT NULL DEFAULT 1,  -- 账户币种→CNY 汇率（CNY 账户恒为 1）
   input_currency TEXT,              -- 用户录入时选择的币种（CNY | USD）
   input_amount   REAL,              -- 用户录入的原始金额（input_currency 计价）
+  to_account_id  INTEGER REFERENCES account(id) ON DELETE CASCADE,  -- transfer 转入账户
+  to_amount      REAL,              -- transfer 转入金额（转入账户币种）
+  to_currency    TEXT,              -- transfer 转入账户币种
+  to_fx          REAL,              -- 转入账户币种→CNY
   note           TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_cashflow_user ON cash_flow(user_id);
+CREATE INDEX IF NOT EXISTS idx_cashflow_account_date ON cash_flow(account_id, date);
+CREATE INDEX IF NOT EXISTS idx_cashflow_to_account ON cash_flow(to_account_id, date);
 
 -- 定投计划
 CREATE TABLE IF NOT EXISTS dca_plan (
@@ -169,6 +193,32 @@ CREATE TABLE IF NOT EXISTS notification (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_notification_user ON notification(user_id, is_read);
+
+-- 写操作审计（不存请求体，避免敏感信息落库）
+CREATE TABLE IF NOT EXISTS audit_log (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER,
+  action     TEXT NOT NULL,          -- create | update | delete | import | demo
+  entity     TEXT,                   -- account | asset | event | cashflow | ...
+  entity_id  TEXT,
+  path       TEXT,
+  status     INTEGER,
+  ip         TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id, id);
+
+-- 删除归档（可恢复；不改变主表查询）
+CREATE TABLE IF NOT EXISTS deletion_archive (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL,
+  kind       TEXT NOT NULL,          -- account | asset | event | cashflow
+  label      TEXT,
+  payload    TEXT NOT NULL,          -- JSON
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_archive_user ON deletion_archive(user_id, id);
+CREATE INDEX IF NOT EXISTS idx_dca_user_active ON dca_plan(user_id, active);
 `;
 
 function now() {
@@ -181,6 +231,7 @@ function init(dbPath) {
   db = new Database(resolved);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  db.pragma('busy_timeout = 5000');
   db.exec(SCHEMA);
   migrate();            // 老库补列 + v5 口径迁移
   bootstrapAdmin();
@@ -194,12 +245,20 @@ function addColumn(table, col, ddl) {
 }
 
 function migrate() {
+  addColumn('user', 'token_version', 'token_version INTEGER NOT NULL DEFAULT 0');
+  addColumn('login_code', 'attempts', 'attempts INTEGER NOT NULL DEFAULT 0');
   addColumn('asset', 'unit_price', 'unit_price REAL NOT NULL DEFAULT 0');
   addColumn('asset', 'margin_cny', 'margin_cny REAL NOT NULL DEFAULT 0');
   addColumn('asset', 'price_source', 'price_source TEXT');
   addColumn('asset', 'price_date', 'price_date TEXT');
   addColumn('event', 'margin_cny', 'margin_cny REAL NOT NULL DEFAULT 0');
+  addColumn('snapshot', 'source', "source TEXT NOT NULL DEFAULT 'manual'");
+  addColumn('snapshot', 'derived_at', 'derived_at TEXT');
   addColumn('cash_flow', 'input_currency', 'input_currency TEXT');
+  addColumn('cash_flow', 'to_account_id', 'to_account_id INTEGER');
+  addColumn('cash_flow', 'to_amount', 'to_amount REAL');
+  addColumn('cash_flow', 'to_currency', 'to_currency TEXT');
+  addColumn('cash_flow', 'to_fx', 'to_fx REAL');
   addColumn('cash_flow', 'input_amount', 'input_amount REAL');
   /* 老出入金记录：录入币种即账户币种、原始金额即 amount（幂等，只补 NULL 行） */
   db.prepare(`UPDATE cash_flow
@@ -348,6 +407,9 @@ function bootstrapAdmin() {
               VALUES (?,?,?,'admin','active',?,?)`)
     .run(config.ADMIN.username, config.ADMIN.email, hash, now(), JSON.stringify({}));
   console.log(`[init] 已创建管理员账号: ${config.ADMIN.username}（请尽快修改默认密码）`);
+  if (config.ADMIN.password === 'admin12345') {
+    console.warn('[init] ⚠️ 当前使用默认管理员密码 admin12345，请立即修改或通过 ADMIN_PASSWORD 设置强密码');
+  }
 }
 
 /* ---------- 系统配置 ---------- */

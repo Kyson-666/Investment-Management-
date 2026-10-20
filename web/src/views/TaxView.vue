@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <h2>税务估算</h2>
-        <div class="sub">分红税按持有期限定档（A股）/ 30%（美股）；资本利得按市场×年度汇总，仅为估算，不构成税务建议</div>
+        <div class="sub">分红税按持有期限定档（A股股票）/ 30%（美股股票）；资本利得按 CNY / USD 资产 × 年度汇总，仅为估算，不构成税务建议</div>
       </div>
       <div class="actions">
         <el-button type="primary" :loading="saving" @click="save">保存税率规则</el-button>
@@ -12,7 +12,7 @@
 
     <div class="kpi-row" style="grid-template-columns:repeat(3,1fr)">
       <div class="kpi"><div class="label">分红税合计 (CNY)</div><div class="val num">¥{{ money(tax.divTax) }}</div><div class="sub">按每笔分红的持有期限定档</div></div>
-      <div class="kpi"><div class="label">资本利得税估算 (CNY)</div><div class="val num">¥{{ money(tax.capGainTax) }}</div><div class="sub">A股暂免 / 美股按设定税率</div></div>
+      <div class="kpi"><div class="label">资本利得税估算 (CNY)</div><div class="val num">¥{{ money(tax.capGainTax) }}</div><div class="sub">CNY 资产暂免 / USD 资产按设定税率</div></div>
       <div class="kpi"><div class="label">应缴税合计 (CNY)</div><div class="val num" style="color:#e08a3e">¥{{ money(tax.totalTax) }}</div><div class="sub">估算值，以实际申报为准</div></div>
     </div>
 
@@ -42,16 +42,17 @@
             </el-table-column>
           </el-table>
           <p class="form-tip" style="margin-top:8px">
-            A股股息红利差别化：持股 ≤1 个月按 20%、1 个月~1 年按 10%、超过 1 年免征；持有期限自买入批次按 FIFO 计算。
+            A股股息红利差别化：持股 ≤1 个月按 20%、1 个月~1 年按 10%、超过 1 年免征；
+            持有期限按<b>各批次份额占比分摊</b>后逐批次定档（近似 FIFO），不再统一按最早买入日。
           </p>
         </div>
 
         <div class="card">
-          <h3>资本利得明细（按市场 × 年度）<span class="hint">仅对已实现卖出收益计税，亏损年度不计税</span></h3>
+          <h3>资本利得明细（按市场 × 年度）<span class="hint">仅对已实现卖出/赎回收益计税，亏损年度不计税</span></h3>
           <el-table :data="tax.capGainRows || []" size="small" empty-text="暂无已实现资本利得">
             <el-table-column label="市场" width="90">
               <template #default="{ row }">
-                <span :class="'badge ' + (row.market === 'CN' ? 'badge-cn' : 'badge-us')">{{ row.market === 'CN' ? 'A股' : '美股' }}</span>
+                <span :class="'badge ' + (row.market === 'CN' ? 'badge-cn' : 'badge-us')">{{ row.market === 'CN' ? 'CNY 资产' : 'USD 资产' }}</span>
               </template>
             </el-table-column>
             <el-table-column prop="year" label="年度" width="90" />
@@ -66,7 +67,7 @@
             </el-table-column>
           </el-table>
           <p class="form-tip" style="margin-top:8px">
-            A股个人投资者资本利得目前暂免征收（税率 0%）；美股资本利得对非美国税务居民通常不代扣，此处仅按设定税率做情景估算。
+            CNY 资产（A股等）个人投资者资本利得目前暂免征收（税率 0%）；USD 资产资本利得对非美国税务居民通常不代扣，此处仅按设定税率做情景估算。
           </p>
         </div>
       </div>
@@ -81,15 +82,15 @@
             <el-form-item label="超过 1 年"><el-input-number v-model="rules.cnDiv.gt1y" :min="0" :max="1" :step="0.05" :precision="2" controls-position="right" style="width:130px" /></el-form-item>
             <el-divider content-position="left">美股 / 资本利得</el-divider>
             <el-form-item label="美股分红税"><el-input-number v-model="rules.usDiv" :min="0" :max="1" :step="0.05" :precision="2" controls-position="right" style="width:130px" /><span class="form-tip">默认30%</span></el-form-item>
-            <el-form-item label="A股资本利得税"><el-input-number v-model="rules.cnCapGain" :min="0" :max="1" :step="0.05" :precision="2" controls-position="right" style="width:130px" /></el-form-item>
-            <el-form-item label="美股资本利得税"><el-input-number v-model="rules.usCapGain" :min="0" :max="1" :step="0.05" :precision="2" controls-position="right" style="width:130px" /></el-form-item>
+            <el-form-item label="CNY 资产资本利得税"><el-input-number v-model="rules.cnCapGain" :min="0" :max="1" :step="0.05" :precision="2" controls-position="right" style="width:130px" /></el-form-item>
+            <el-form-item label="USD 资产资本利得税"><el-input-number v-model="rules.usCapGain" :min="0" :max="1" :step="0.05" :precision="2" controls-position="right" style="width:130px" /></el-form-item>
           </el-form>
         </div>
         <div class="card">
           <h3>口径说明</h3>
           <p class="form-tip" style="line-height:1.9">
-            ① 分红税以“每笔分红”为单位，按除息日距最早买入日的持股期限定档（≤1 月 20% / 1 月~1 年 10% / 超 1 年免征）；<br>
-            ② 资本利得按<b>移动加权平均</b>成本口径计算已实现收益，再按市场与年度汇总（不随「成本核算方法」的 FIFO 设置变化，与主账在 FIFO 口径下可能存在差异）；<br>
+            ① 分红税以“每笔分红”为单位，按各批次份额占比分摊后，按批次买入日距除息日的天数定档（≤1 月 20% / 1 月~1 年 10% / 超 1 年免征）；<br>
+            ② 资本利得按<b>移动加权平均</b>成本口径计算已实现收益（覆盖股票/基金/理财/债券的卖出与赎回），再按市场与年度汇总（不随「成本核算方法」的 FIFO 设置变化，与主账在 FIFO 口径下可能存在差异）；<br>
             ③ 所有金额均折算为人民币；<br>
             ④ 本页为辅助估算，不构成税务申报或投资建议。
           </p>

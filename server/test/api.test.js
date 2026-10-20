@@ -48,6 +48,11 @@ const today = iso(new Date());
 const curMonth = monthOf(today);
 const lastMonth = monthOf(daysAgo(15));
 const prevMonth = monthOf(daysAgo(45));
+/** n 个月前的本地月份（用于“只生成过去期次”的定投测试） */
+const monthsAgo = n => {
+  const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - n);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
 
 let adminToken, aliceToken;
 let alice = {};
@@ -359,7 +364,8 @@ test('定投计划：创建并生成 3 期投入记录（幂等）', async () =>
     name: '定投标的', type: 'fund', currency: 'CNY', accountId: alice.bank, unitPrice: 1, marketValue: 0,
   });
   const id = r.json.id;
-  const m = curMonth;
+  /* 只生成“今天及以前”的期次：起始月取 3 个月前，保证 3 期均已发生 */
+  const m = monthsAgo(3);
   r = await api('POST', '/api/dca-plans', aliceToken, {
     assetId: id, startMonth: m, months: 3, day: 15, amount: 1000, note: '月定投',
   });
@@ -461,6 +467,8 @@ test('管理员：重置密码后可用临时密码登录', async () => {
   assert.ok(r.json.tempPassword.length >= 8);
   const l = await api('POST', '/api/auth/login', null, { username: 'alice', password: r.json.tempPassword });
   assert.equal(l.status, 200);
+  /* 重置密码会 token_version+1，旧 token 已失效；后续用例改用新 token */
+  aliceToken = l.json.token;
 });
 
 test('普通用户不能访问管理后台', async () => {
@@ -490,8 +498,13 @@ test('管理员：系统概览', async () => {
 
 /* ---------------- 级联删除 ---------------- */
 test('删除账户级联删除其下资产与事件', async () => {
-  const before = (await api('GET', '/api/assets', aliceToken)).json.length;
-  const r = await api('DELETE', `/api/accounts/${alice.bank}`, aliceToken);
+  const accounts = (await api('GET', '/api/accounts', aliceToken)).json;
+  const assets = (await api('GET', '/api/assets', aliceToken)).json;
+  /* 导入会重映射主键，不能再用初始化时的 alice.bank；动态取一个有资产的账户 */
+  const target = accounts.find(a => assets.some(x => x.accountId === a.id));
+  assert.ok(target, '应存在至少一个有资产的账户');
+  const before = assets.length;
+  const r = await api('DELETE', `/api/accounts/${target.id}`, aliceToken);
   assert.equal(r.status, 200);
   assert.ok(r.json.deletedAssets > 0);
   const after = (await api('GET', '/api/assets', aliceToken)).json.length;
@@ -562,8 +575,10 @@ test('导入含「期初建仓 fx=1」的旧备份时自动修正（非人民币
   assert.ok(imp.json.fxFixed >= 1, `应至少修正 1 笔，实得 ${imp.json.fxFixed}`);
 
   const { getDb, fixOpeningFx } = require('../src/db');
-  const row = getDb().prepare('SELECT fx FROM event WHERE id = 90003').get();
-  assert.ok(row.fx > 1 && row.fx < 8, `期初 fx 应已修正为建仓日生效汇率，实得 ${row.fx}`);
+  /* 导入会重映射主键，不能再按源 id=90003 查询；按资产名 + 事件类型定位 */
+  const row = getDb().prepare(`SELECT e.fx FROM event e JOIN asset a ON a.id=e.asset_id
+    WHERE a.name='导入回归美股' AND e.kind='opening' ORDER BY e.id DESC LIMIT 1`).get();
+  assert.ok(row && row.fx > 1 && row.fx < 8, `期初 fx 应已修正为建仓日生效汇率，实得 ${row && row.fx}`);
 
   /* 幂等：修正后不再满足 fx=1 判定，重复执行 0 笔 */
   assert.equal(fixOpeningFx().fixed, 0, '重复执行修正应为 0 笔');
@@ -629,4 +644,255 @@ test('期初建仓融资：USD 资产按建仓日汇率同口径校验（此前�
   assert.ok(bad.json.error.includes('¥7200'), `错误文案应含 CNY 上限：${bad.json.error}`);
 
   await api('DELETE', `/api/accounts/${acc.json.id}`, adminToken);
+});
+
+/* =========================================================
+ * 审计修复回归（P0）
+ * ========================================================= */
+test('P0 回归：融资买入不虚增 XIRR', async () => {
+  const acc = await api('POST', '/api/accounts', adminToken, { name: 'XIRR融资回归', kind: 'broker', currency: 'CNY' });
+  const a = await api('POST', '/api/assets', adminToken, {
+    name: 'XIRR融资股', type: 'stock', market: 'CN', code: '600001', currency: 'CNY',
+    accountId: acc.json.id, price: 10,
+  });
+  assert.equal(a.status, 201, JSON.stringify(a.json));
+  const dep = await api('POST', '/api/cashflows', adminToken, {
+    accountId: acc.json.id, date: daysAgo(365), kind: 'deposit', amount: 100,
+  });
+  assert.equal(dep.status, 201);
+  const ev = await api('POST', '/api/events', adminToken, {
+    assetId: a.json.id, date: daysAgo(365), side: 'buy', qty: 20, price: 10, marginCNY: 100,
+  });
+  assert.equal(ev.status, 201, JSON.stringify(ev.json));
+
+  const c = await api('GET', `/api/compute?accountId=${acc.json.id}`, adminToken);
+  assert.equal(c.status, 200);
+  assert.ok(Math.abs(c.json.kpis.xirr || 0) < 0.005, `融资且价格不变，XIRR 应≈0，实得 ${c.json.kpis.xirr}`);
+  assert.equal(c.json.kpis.mv, 200);
+  assert.equal(c.json.kpis.marginTotal, 100);
+  assert.equal(c.json.kpis.invest, 100);
+  assert.ok(Math.abs(c.json.kpis.identityDiff) < 0.01, `恒等式偏差 ${c.json.kpis.identityDiff}`);
+
+  await api('DELETE', `/api/accounts/${acc.json.id}`, adminToken);
+});
+
+test('P0 回归：超卖被拒、编辑流水保留融资、账户币种锁定', async () => {
+  const acc = await api('POST', '/api/accounts', adminToken, { name: '写入回归账户', kind: 'broker', currency: 'CNY' });
+  const a = await api('POST', '/api/assets', adminToken, {
+    name: '写入回归股', type: 'stock', market: 'CN', code: '600002', currency: 'CNY',
+    accountId: acc.json.id, price: 10,
+  });
+  const buy = await api('POST', '/api/events', adminToken, {
+    assetId: a.json.id, date: today, side: 'buy', qty: 20, price: 10, marginCNY: 50,
+  });
+  assert.equal(buy.status, 201, JSON.stringify(buy.json));
+
+  /* 只改备注，融资必须保留 */
+  const upd = await api('PUT', `/api/events/${buy.json.id}`, adminToken, { note: '只改备注' });
+  assert.equal(upd.status, 200, JSON.stringify(upd.json));
+  const evs = await api('GET', `/api/events?assetId=${a.json.id}`, adminToken);
+  const row = evs.json.find(x => x.id === buy.json.id);
+  assert.equal(row.marginCNY, 50, '编辑不应清空融资');
+
+  /* 超卖 100 > 持仓 20 → 400 */
+  const bad = await api('POST', '/api/events', adminToken, {
+    assetId: a.json.id, date: today, side: 'sell', qty: 100, price: 10,
+  });
+  assert.equal(bad.status, 400);
+  assert.ok(bad.json.error.includes('可用'), bad.json.error);
+
+  /* 已有资产 → 禁止改账户币种 */
+  const cur = await api('PUT', `/api/accounts/${acc.json.id}`, adminToken, { currency: 'USD' });
+  assert.equal(cur.status, 400);
+  assert.ok(cur.json.error.includes('币种不可修改'), cur.json.error);
+
+  await api('DELETE', `/api/accounts/${acc.json.id}`, adminToken);
+});
+
+test('P0 回归：定投不生成未来期次', async () => {
+  const acc = await api('POST', '/api/accounts', adminToken, { name: '定投未来回归', kind: 'bank', currency: 'CNY' });
+  const a = await api('POST', '/api/assets', adminToken, {
+    name: '未来定投基金', type: 'fund', code: '000001', currency: 'CNY',
+    accountId: acc.json.id, unitPrice: 1, marketValue: 0,
+  });
+  assert.equal(a.status, 201, JSON.stringify(a.json));
+  const plan = await api('POST', '/api/dca-plans', adminToken, {
+    assetId: a.json.id, startMonth: monthsAgo(-1), months: 3, day: 15, amount: 100,
+  });
+  assert.equal(plan.status, 201, JSON.stringify(plan.json));
+  const gen = await api('POST', `/api/dca-plans/${plan.json.id}/generate`, adminToken);
+  assert.equal(gen.status, 200);
+  assert.equal(gen.json.insertedCount, 0, '未来期次不应写入事件表');
+
+  await api('DELETE', `/api/accounts/${acc.json.id}`, adminToken);
+});
+
+test('P0 回归：第二个用户可载入示例数据（主键不冲突）', async () => {
+  const uname = `carol${Date.now()}`;
+  const reg = await api('POST', '/api/auth/register', null, {
+    username: uname, email: `${uname}@test.com`, password: 'Carol12345',
+  });
+  assert.equal(reg.status, 201, JSON.stringify(reg.json));
+  const demo = await api('POST', '/api/demo', reg.json.token);
+  assert.equal(demo.status, 200, JSON.stringify(demo.json));
+  const accounts = await api('GET', '/api/accounts', reg.json.token);
+  assert.equal(accounts.json.length, 3);
+  const c = await api('GET', '/api/compute', reg.json.token);
+  assert.equal(c.status, 200);
+  assert.ok(Math.abs(c.json.kpis.identityDiff) < 0.01, `示例数据恒等式偏差 ${c.json.kpis.identityDiff}`);
+
+  /* 跨用户导入：carol 的备份导入 dave，主键应重映射而不是冲突 */
+  const exp = await api('GET', '/api/export', reg.json.token);
+  assert.equal(exp.status, 200);
+  const uname2 = `dave${Date.now()}`;
+  const reg2 = await api('POST', '/api/auth/register', null, {
+    username: uname2, email: `${uname2}@test.com`, password: 'Dave12345',
+  });
+  assert.equal(reg2.status, 201);
+  const imp = await api('POST', '/api/import', reg2.json.token, exp.json);
+  assert.equal(imp.status, 200, JSON.stringify(imp.json));
+  assert.equal(imp.json.counts.accounts, 3);
+  const accounts2 = await api('GET', '/api/accounts', reg2.json.token);
+  assert.equal(accounts2.json.length, 3);
+});
+
+test('P1 回归：月末快照按事件与历史净值派生，并返回差异', async () => {
+  /* 独立用户，避免受其他用例残留持仓影响 */
+  const uname = `snap${Date.now()}`;
+  const reg = await api('POST', '/api/auth/register', null, {
+    username: uname, email: `${uname}@test.com`, password: 'Snap12345',
+  });
+  assert.equal(reg.status, 201, JSON.stringify(reg.json));
+  const token = reg.json.token;
+
+  const acc = await api('POST', '/api/accounts', token, { name: '快照派生回归', kind: 'bank', currency: 'CNY' });
+  const a = await api('POST', '/api/assets', token, {
+    name: '快照派生基金', type: 'fund', code: '000002', currency: 'CNY',
+    accountId: acc.json.id, unitPrice: 12, marketValue: 0,
+  });
+  assert.equal(a.status, 201, JSON.stringify(a.json));
+  const ev = await api('POST', '/api/events', token, {
+    assetId: a.json.id, date: '2026-01-10', kind: 'invest', qty: 100, price: 10, amount: 1000,
+  });
+  assert.equal(ev.status, 201, JSON.stringify(ev.json));
+
+  /* 插入月末历史净值 11：派生应使用 11，而不是当前净值 12 */
+  getDb().prepare(`INSERT INTO asset_price_history (asset_id,date,unit_price,source,created_at)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(asset_id,date) DO UPDATE SET unit_price=excluded.unit_price`)
+    .run(a.json.id, '2026-01-31', 11, 'manual', new Date().toISOString());
+
+  const d = await api('GET', '/api/snapshots/derive?month=2026-01', token);
+  assert.equal(d.status, 200, JSON.stringify(d.json));
+  assert.equal(d.json.complete, true);
+  assert.equal(d.json.missingPrice, 0);
+  assert.equal(d.json.total, 1100);
+
+  const save = await api('POST', '/api/snapshots', token, { month: '2026-01', total: 1000 });
+  assert.equal(save.status, 201, JSON.stringify(save.json));
+  assert.equal(save.json.source, 'manual');
+  assert.equal(save.json.derived.total, 1100);
+  assert.equal(save.json.derived.diff, -100);
+  assert.ok(Math.abs(save.json.derived.diffPct + 0.090909) < 0.00001);
+
+  /* 删除历史净值后，历史月份只能按当前价估算 → complete=false、diff=null */
+  getDb().prepare('DELETE FROM asset_price_history WHERE asset_id=?').run(a.json.id);
+  const d2 = await api('GET', '/api/snapshots/derive?month=2026-01', token);
+  assert.equal(d2.status, 200);
+  assert.equal(d2.json.complete, false);
+  assert.ok(d2.json.estimatedPrice >= 1);
+  assert.equal(d2.json.diff, null);
+
+  await api('DELETE', '/api/snapshots/2026-01', token);
+  await api('DELETE', `/api/accounts/${acc.json.id}`, token);
+});
+
+test('P1 回归：现金划转与校准：不改变组合投入，账户视角投入随划转调整', async () => {
+  const uname = `cash${Date.now()}`;
+  const reg = await api('POST', '/api/auth/register', null, {
+    username: uname, email: `${uname}@test.com`, password: 'Cash12345',
+  });
+  assert.equal(reg.status, 201, JSON.stringify(reg.json));
+  const token = reg.json.token;
+
+  const a = await api('POST', '/api/accounts', token, { name: '划转A', kind: 'bank', currency: 'CNY' });
+  const b = await api('POST', '/api/accounts', token, { name: '划转B', kind: 'bank', currency: 'USD' });
+  const dep = await api('POST', '/api/cashflows', token, {
+    accountId: a.json.id, date: '2026-01-05', kind: 'deposit', amount: 1000,
+  });
+  assert.equal(dep.status, 201, JSON.stringify(dep.json));
+  const tr = await api('POST', '/api/cashflows', token, {
+    accountId: a.json.id, toAccountId: b.json.id, date: '2026-02-05', kind: 'transfer',
+    amount: 700, toAmount: 100, toFx: 7,
+  });
+  assert.equal(tr.status, 201, JSON.stringify(tr.json));
+  const adj = await api('POST', '/api/cashflows', token, {
+    accountId: a.json.id, date: '2026-03-05', kind: 'adjust', amount: 50,
+  });
+  assert.equal(adj.status, 201, JSON.stringify(adj.json));
+
+  const all = await api('GET', '/api/compute', token);
+  assert.equal(all.status, 200);
+  assert.equal(all.json.kpis.cash, 1050);
+  assert.equal(all.json.kpis.netDeposit, 1000);
+  assert.equal(all.json.kpis.invest, 1000);
+  assert.equal(all.json.kpis.profit, 50);
+  assert.equal(all.json.kpis.real, 50);
+  assert.ok(Math.abs(all.json.kpis.identityDiff) < 0.01, `组合恒等式 ${all.json.kpis.identityDiff}`);
+
+  const ca = await api('GET', `/api/compute?accountId=${a.json.id}`, token);
+  assert.equal(ca.json.kpis.cash, 350);
+  assert.equal(ca.json.kpis.invest, 300);   // 1000 − 转出 700
+  assert.ok(Math.abs(ca.json.kpis.identityDiff) < 0.01, `A 账户恒等式 ${ca.json.kpis.identityDiff}`);
+
+  const cb = await api('GET', `/api/compute?accountId=${b.json.id}`, token);
+  assert.equal(cb.json.kpis.cash, 700);
+  assert.equal(cb.json.kpis.invest, 700);   // 转入 100 USD × 7
+  assert.ok(Math.abs(cb.json.kpis.identityDiff) < 0.01, `B 账户恒等式 ${cb.json.kpis.identityDiff}`);
+
+  await api('DELETE', `/api/accounts/${a.json.id}`, token);
+  await api('DELETE', `/api/accounts/${b.json.id}`, token);
+});
+
+test('P1 回归：删除账户先归档，可恢复账户/资产/流水', async () => {
+  const uname = `arch${Date.now()}`;
+  const reg = await api('POST', '/api/auth/register', null, {
+    username: uname, email: `${uname}@test.com`, password: 'Arch12345',
+  });
+  assert.equal(reg.status, 201, JSON.stringify(reg.json));
+  const token = reg.json.token;
+
+  const acc = await api('POST', '/api/accounts', token, { name: '归档账户', kind: 'broker', currency: 'CNY' });
+  const a = await api('POST', '/api/assets', token, {
+    name: '归档股票', type: 'stock', market: 'CN', code: '600003', currency: 'CNY',
+    accountId: acc.json.id, price: 10,
+  });
+  const ev = await api('POST', '/api/events', token, {
+    assetId: a.json.id, date: '2026-01-05', side: 'buy', qty: 100, price: 10,
+  });
+  assert.equal(ev.status, 201, JSON.stringify(ev.json));
+
+  const del = await api('DELETE', `/api/accounts/${acc.json.id}`, token);
+  assert.equal(del.status, 200, JSON.stringify(del.json));
+  assert.ok(del.json.archivedId, '删除应返回归档 id');
+  assert.equal((await api('GET', '/api/accounts', token)).json.length, 0);
+
+  const list = await api('GET', '/api/archive', token);
+  assert.equal(list.status, 200);
+  assert.ok(list.json.some(x => x.id === del.json.archivedId && x.kind === 'account'));
+
+  const restore = await api('POST', `/api/archive/${del.json.archivedId}/restore`, token);
+  assert.equal(restore.status, 200, JSON.stringify(restore.json));
+  assert.ok(restore.json.accountId);
+  const accounts = await api('GET', '/api/accounts', token);
+  const assets = await api('GET', '/api/assets', token);
+  const events = await api('GET', '/api/events?assetId=' + assets.json[0].id, token);
+  assert.equal(accounts.json.length, 1);
+  assert.equal(assets.json.length, 1);
+  assert.equal(events.json.length, 1);
+  assert.equal(assets.json[0].name, '归档股票');
+
+  const purge = await api('DELETE', `/api/archive/${del.json.archivedId}`, token);
+  assert.equal(purge.status, 200);
+  assert.equal((await api('GET', '/api/archive', token)).json.length, 0);
 });

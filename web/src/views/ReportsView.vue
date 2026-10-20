@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <h2>收益报表</h2>
-        <div class="sub">月度/年度已实现与含浮动收益（月末快照在「数据」页录入；无快照月份仅统计已实现）</div>
+        <div class="sub">月度/年度已实现（含分红/利息/现金校准）与含浮动收益（月末快照在「数据」页录入；无快照月份仅统计已实现）</div>
       </div>
       <div class="actions">
         <el-select v-model="year" size="small" style="width:120px">
@@ -22,10 +22,10 @@
         <h3>月度明细</h3>
         <el-table :data="monthsOfYear" size="small" empty-text="该年暂无数据">
           <el-table-column prop="month" label="月份" width="90" />
-          <el-table-column label="净投入" align="right">
+          <el-table-column label="证券净投入" align="right">
             <template #default="{ row }">{{ money(row.net) }}</template>
           </el-table-column>
-          <el-table-column label="月末总值" align="right">
+          <el-table-column label="月末持仓市值" align="right">
             <template #default="{ row }">{{ row.snap != null ? money(row.snap) : '—' }}</template>
           </el-table-column>
           <el-table-column label="已实现" align="right">
@@ -55,7 +55,8 @@
           </el-table-column>
         </el-table>
         <p class="form-tip" style="margin-top:10px">
-          含浮动收益 = 月末总值 − 上月末总值 − 当月净投入；需连续月末快照，否则该月仅显示已实现。
+          纯浮动 = 本月末持仓市值 − 上次快照市值 − <b>区间</b>证券净投入；含浮动 = 当月已实现 + 纯浮动。
+          断档月份会累加区间内全部买卖/申赎，仍建议连续录入月末快照。
         </p>
       </div>
     </div>

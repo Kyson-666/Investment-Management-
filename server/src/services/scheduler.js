@@ -4,7 +4,7 @@
  * - 汇率同步（每日 08:00，主源失败降级备用源）
  * - 月末快照（每月最后一天 23:50）
  * - 定投生成（每日 00:10 检查当日到期计划，幂等）
- * - 预警扫描（每日 16:00 收盘后，站内通知；配置 SMTP 后可邮件）
+ * - 预警扫描（每日 16:00 收盘后，写站内通知；邮件通道尚未接入）
  * - 数据备份（每日 03:00，保留 30 天）
  */
 const cron = require('node-cron');
@@ -13,6 +13,7 @@ const quotesService = require('./quotes');
 const { getDb, now } = require('../db');
 const { config } = require('../config');
 const fxService = require('./fx');
+const prices = require('./prices');
 const { backupDatabase } = require('./backup');
 const portfolio = require('./portfolio');
 const Calc = require('../calc');
@@ -41,37 +42,43 @@ function jobMonthlySnapshot() {
       /* v6 起 kpis 已无 total 字段（改用 mv = 持仓市值），快照即持仓市值口径 */
       const total = portfolio.computeAll(u.id).kpis.mv;
       if (!(total > 0)) continue;
-      db.prepare(`INSERT INTO snapshot (user_id,month,total) VALUES (?,?,?)
-                  ON CONFLICT(user_id,month) DO UPDATE SET total=excluded.total`).run(u.id, month, total);
+      db.prepare(`INSERT INTO snapshot (user_id,month,total,source,derived_at) VALUES (?,?,?,'auto',?)
+                  ON CONFLICT(user_id,month) DO UPDATE SET total=excluded.total,
+                    source=excluded.source, derived_at=excluded.derived_at`).run(u.id, month, total, now());
       n++;
     } catch (e) { console.warn(`[cron] 快照失败 user=${u.id}: ${e.message}`); }
   }
   console.log(`[cron] 月末快照完成：${n} 位用户`);
 }
 
+/** 判断定投计划在给定日期是否到期（纯函数，便于单测） */
+function planDue(plan, today) {
+  const { y, m, day } = today;
+  if (+plan.day !== +day) return false;
+  const [sy, sm] = String(plan.start_month || '').split('-').map(Number);
+  if (!sy || !sm) return false;
+  const elapsed = (y - sy) * 12 + (m - sm);
+  return elapsed >= 0 && elapsed < (plan.months || 12);
+}
+
 /** 定投生成：为今天到期的 active 计划补投（同日已有 invest 事件则跳过） */
 function jobDcaGenerate() {
   const db = getDb();
-  const { year: y, month: m0, day } = (() => {
-    const d = new Date();
-    return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
-  })();
+  const parts = todayParts();
+  const { date } = parts;
   const plans = db.prepare('SELECT * FROM dca_plan WHERE active=1').all();
   let count = 0;
   for (const p of plans) {
-    if (p.day !== day) continue;
-    const [sy, sm] = p.start_month.split('-').map(Number);
-    const elapsed = (y - sy) * 12 + (m0 - sm);
-    if (elapsed < 0 || elapsed >= p.months) continue;
-    const date = todayParts().date;
+    if (!planDue(p, parts)) continue;
     const exists = db.prepare("SELECT id FROM event WHERE asset_id=? AND date=? AND kind='invest'").get(p.asset_id, date);
     if (exists) continue;
     const asset = db.prepare('SELECT * FROM asset WHERE id=?').get(p.asset_id);
     const fx = asset && asset.currency === 'USD' ? fxService.currentFx(date) : 1;
     /* ⚠️ 必须与手动接口（routes/dcaPlans.js）一致地写入 qty/price：
        只写 amount 会让引擎拿不到份额（tQty=0）→ 份额不增加、成本照常累加，
-       账面会把全部定投本金显示为浮动亏损。 */
-    const nav = asset && +asset.unit_price > 0 ? +asset.unit_price : 1;
+       账面会把全部定投本金显示为浮动亏损。净值优先取当日历史净值。 */
+    const hist = prices.priceAt(db, p.asset_id, date);
+    const nav = hist ? +hist.unit_price : (asset && +asset.unit_price > 0 ? +asset.unit_price : 1);
     const qty = +((+p.amount || 0) / nav).toFixed(6);
     db.prepare(`INSERT INTO event
                 (user_id,asset_id,date,kind,side,qty,price,amount,ratio,fee,fx,is_t,note,created_at)
@@ -181,4 +188,5 @@ function startScheduler() {
 
 module.exports = {
   startScheduler, jobSyncFx, jobMonthlySnapshot, jobDcaGenerate, jobScanAlerts, jobBackup, jobSyncQuotes,
+  planDue,
 };

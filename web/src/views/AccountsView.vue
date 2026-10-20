@@ -16,7 +16,7 @@
           <thead>
             <tr>
               <th>账户名称</th><th>类型</th><th>币种</th>
-              <th class="num">市值(CNY)</th><th class="num">融资(CNY)</th><th class="num">已实现</th><th class="num">浮动</th>
+              <th class="num">持仓市值(CNY)</th><th class="num">融资(CNY)</th><th class="num">已实现(含分红/利息/校准)</th><th class="num">浮动</th>
               <th class="num">总收益</th><th class="num">收益率</th><th>备注</th><th class="col-actions">操作</th>
             </tr>
           </thead>
@@ -79,7 +79,7 @@ const ops = ref(null);
 const rows = computed(() => store.accounts.map(a => {
   const agg = store.accountsAgg.find(x => String(x.id) === String(a.id));
   const hs = store.holdings.filter(h => String(h.asset.accountId) === String(a.id));
-  const real = hs.reduce((s, h) => s + (h.realCNY || 0), 0);
+  const real = hs.reduce((s, h) => s + (h.realTotalCNY || 0), 0) + (agg?.cashAdjust || 0);
   const unreal = hs.reduce((s, h) => s + (h.unrealCNY || 0), 0);
   return {
     ...a,
@@ -87,7 +87,7 @@ const rows = computed(() => store.accounts.map(a => {
     real,
     unreal,
     total: agg?.total || real + unreal,
-    ret: agg?.ret || 0,
+    ret: agg?.ret ?? null,
   };
 }));
 const total = computed(() => rows.value.reduce((s, a) => ({

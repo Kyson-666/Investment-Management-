@@ -47,7 +47,8 @@
     <div class="card">
       <h3>说明</h3>
       <ul class="form-tip" style="padding-left:18px;line-height:1.9">
-        <li>「生成投入记录」按起始月起每月扣款日批量写入申购(kind=invest)事件，可重复点击——已存在的日期会自动跳过（幂等）。</li>
+        <li>「生成投入记录」按起始月起每月扣款日批量写入申购(kind=invest)事件，<b>只生成到今天为止的期次</b>，未来期次由每日 00:10 的任务逐期生成；可重复点击——已存在的日期会自动跳过（幂等）。</li>
+        <li>每期份额按<b>发生日最近净值</b>折算；若该日期没有净值历史，会退回当前净值并在返回结果中标记为“估算”，建议先同步行情或补录净值。</li>
         <li>美元标的每期使用该发生日生效的汇率锁定，历史记录不受后续汇率变动影响。</li>
         <li>系统每日 00:10 自动为当天到期且启用中的计划补投；也可随时手动生成。</li>
       </ul>
@@ -88,7 +89,9 @@ const assetCcy = id => store.assetById(id)?.currency || '';
 async function generate(row) {
   try {
     const r = await dcaApi.generate(row.id);
-    ElMessage.success(`生成完成：新增 ${r.insertedCount} 笔，跳过已存在 ${r.skippedCount} 笔`);
+    let msg = `生成完成：新增 ${r.insertedCount} 笔，跳过已存在 ${r.skippedCount} 笔`;
+    if (r.estimatedCount) msg += `；其中 ${r.estimatedCount} 笔缺历史净值，已按当前净值估算`;
+    ElMessage({ message: msg, type: r.estimatedCount ? 'warning' : 'success', duration: r.estimatedCount ? 6000 : 3000 });
     await store.refreshAll();
   } catch (e) { ElMessage.error(e.message); }
 }

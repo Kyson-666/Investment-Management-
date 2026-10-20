@@ -37,7 +37,7 @@
         <h3>账户统计</h3>
         <div class="tbl-wrap">
           <table class="tbl">
-            <thead><tr><th>账户</th><th>类型</th><th class="num">市值(CNY)</th><th class="num">总收益</th><th class="num">收益率</th></tr></thead>
+            <thead><tr><th>账户</th><th>类型</th><th class="num">持仓市值(CNY)</th><th class="num">总收益</th><th class="num">收益率</th></tr></thead>
             <tbody>
               <tr v-for="a in store.accountsAgg" :key="a.id">
                 <td>{{ a.name }}</td>

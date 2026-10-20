@@ -89,8 +89,8 @@ function buildState(userId) {
   const fx = db.prepare('SELECT date, rate, source, note FROM fx_rate ORDER BY date').all()
     .map(f => ({ date: f.date, rate: f.rate, source: f.source, note: f.note || '' }));
 
-  const snapshots = db.prepare('SELECT month, total FROM snapshot WHERE user_id=? ORDER BY month').all(userId)
-    .map(s => ({ month: s.month, total: s.total }));
+  const snapshots = db.prepare('SELECT month, total, source, derived_at FROM snapshot WHERE user_id=? ORDER BY month').all(userId)
+    .map(s => ({ month: s.month, total: s.total, source: s.source || 'manual', derivedAt: s.derived_at || null }));
 
   const benchRows = db.prepare('SELECT date, value FROM benchmark WHERE user_id=? AND code=? ORDER BY date')
     .all(userId, settings.benchmarkCode)
@@ -100,7 +100,11 @@ function buildState(userId) {
     .map(c => ({
       id: String(c.id), accountId: String(c.account_id), date: c.date, kind: c.kind,
       amount: c.amount, fx: c.fx || 1, note: c.note || '',
+      amountCNY: Math.round((+c.amount || 0) * (c.fx || 1) * 100) / 100,
       inputCurrency: c.input_currency || null, inputAmount: c.input_amount != null ? c.input_amount : c.amount,
+      toAccountId: c.to_account_id != null ? String(c.to_account_id) : null,
+      toAmount: c.to_amount, toCurrency: c.to_currency, toFx: c.to_fx,
+      toAmountCNY: c.to_amount != null ? Math.round((+c.to_amount || 0) * (c.to_fx || 1) * 100) / 100 : null,
     }));
 
   const dcaPlans = db.prepare('SELECT * FROM dca_plan WHERE user_id=? ORDER BY id').all(userId)

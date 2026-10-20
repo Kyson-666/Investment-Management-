@@ -9,6 +9,7 @@ const { signToken, authRequired } = require('../middleware/auth');
 const { asyncHandler, badRequest, validateRegistration, EMAIL_RE } = require('../middleware/helpers');
 const mailer = require('../services/mailer');
 const { getUserSettings, saveUserSettings } = require('../state');
+const { rateLimit } = require('../middleware/rateLimit');
 
 const router = express.Router();
 
@@ -21,7 +22,7 @@ function publicUser(u) {
 }
 
 /* ---------- 注册 ---------- */
-router.post('/register', asyncHandler(async (req, res) => {
+router.post('/register', rateLimit({ windowMs: 60 * 60 * 1000, max: 20 }), asyncHandler(async (req, res) => {
   const err = validateRegistration(req.body || {});
   if (err) return badRequest(res, err);
   const username = String(req.body.username).trim();
@@ -45,16 +46,22 @@ router.post('/register', asyncHandler(async (req, res) => {
 }));
 
 /* ---------- 发送邮箱验证码 ---------- */
-router.post('/send-code', asyncHandler(async (req, res) => {
+router.post('/send-code', rateLimit({
+  windowMs: 60 * 60 * 1000, max: 10,
+  key: req => `${req.ip}|${String(req.body?.email || '').trim().toLowerCase()}`,
+}), asyncHandler(async (req, res) => {
   const email = String(req.body?.email || '').trim().toLowerCase();
   if (!EMAIL_RE.test(email)) return badRequest(res, '邮箱格式不正确');
   const db = getDb();
   const user = db.prepare("SELECT * FROM user WHERE email=? AND status='active'").get(email);
-  if (!user) return badRequest(res, '该邮箱未注册或账号已禁用');
+  /* 不暴露“邮箱是否注册”：未注册也返回同样的 ok，但不发信 */
+  if (!user) return res.json({ ok: true, sent: true });
 
+  /* 同一邮箱只保留最新一条有效验证码，避免旧码长期可用 */
+  db.prepare('UPDATE login_code SET used=1 WHERE email=? AND used=0').run(email);
   const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
   const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-  db.prepare('INSERT INTO login_code (email,code,expires_at,used,created_at) VALUES (?,?,?,0,?)')
+  db.prepare('INSERT INTO login_code (email,code,expires_at,used,attempts,created_at) VALUES (?,?,?,0,0,?)')
     .run(email, code, expiresAt, now());
 
   let sent = true;
@@ -74,7 +81,10 @@ router.post('/send-code', asyncHandler(async (req, res) => {
 }));
 
 /* ---------- 登录（用户名+密码 或 邮箱+验证码） ---------- */
-router.post('/login', asyncHandler(async (req, res) => {
+router.post('/login', rateLimit({
+  windowMs: 15 * 60 * 1000, max: 30,
+  key: req => `${req.ip}|${String(req.body?.username || req.body?.email || '').trim().toLowerCase()}`,
+}), asyncHandler(async (req, res) => {
   const db = getDb();
   const { username, password, email, code } = req.body || {};
 
@@ -82,7 +92,15 @@ router.post('/login', asyncHandler(async (req, res) => {
   if (email && code) {
     const row = db.prepare(`SELECT * FROM login_code WHERE email=? AND used=0 ORDER BY id DESC LIMIT 1`)
       .get(String(email).trim().toLowerCase());
-    if (!row || row.code !== String(code)) return badRequest(res, '验证码错误');
+    if (!row || row.code !== String(code)) {
+      /* 单码最多 5 次尝试；达到上限即作废，防止 6 位码被穷举 */
+      if (row) {
+        const attempts = (+row.attempts || 0) + 1;
+        db.prepare('UPDATE login_code SET attempts=?, used=CASE WHEN ?>=5 THEN 1 ELSE used END WHERE id=?')
+          .run(attempts, attempts, row.id);
+      }
+      return badRequest(res, '验证码错误');
+    }
     if (new Date(row.expires_at).getTime() < Date.now()) return badRequest(res, '验证码已过期');
     user = db.prepare("SELECT * FROM user WHERE email=?").get(String(email).trim().toLowerCase());
     db.prepare('UPDATE login_code SET used=1 WHERE id=?').run(row.id);
@@ -146,7 +164,8 @@ router.put('/password', authRequired, (req, res) => {
     return badRequest(res, '原密码不正确');
   }
   const hash = bcrypt.hashSync(String(newPassword), 10);
-  getDb().prepare('UPDATE user SET password_hash=? WHERE id=?').run(hash, req.user.id);
+  /* token_version +1：改密后旧 JWT 立即失效（无需维护黑名单） */
+  getDb().prepare('UPDATE user SET password_hash=?, token_version=token_version+1 WHERE id=?').run(hash, req.user.id);
   res.json({ ok: true });
 });
 

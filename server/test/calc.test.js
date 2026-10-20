@@ -333,9 +333,9 @@ const near = (name, got, want, tol = 0.001) => {
   const s3 = C.summary(S3);
   eq('持仓市值', s3.mv, 12000, 0.01);
   eq('账户现金', s3.cash, 5000, 0.01);
-  eq('累计收益 = 已实现 + 浮动', s3.profitAccount, 17000 - 15000, 0.01);
-  eq('持仓口径收益(浮动2000)', s3.profitInvest, 2000, 0.01);
-  eq('两口径一致', s3.profitAccount, s3.profitInvest, 0.01);
+  eq('累计收益 = 已实现 + 浮动', s3.profit, 17000 - 15000, 0.01);
+  eq('有效净投入 = 净入金（无期初）', s3.invest, 15000, 0.01);
+  eq('恒等式 profit = mv + cash − margin − invest', s3.profit, s3.mv + s3.cash - s3.marginTotal - s3.invest, 0.01);
 
   console.log('\n— 场景20 累计投入可增可减 —');
   const S4 = JSON.parse(JSON.stringify(S3));
@@ -350,7 +350,8 @@ const near = (name, got, want, tol = 0.001) => {
   eq('清仓后现金(20000−5000−10000+12000)', s5.cash, 17000, 0.01);
   eq('清仓后持仓市值 = 0', s5.mv, 0, 0.01);
   eq('清仓后现金 = 17000', s5.cash, 17000, 0.01);
-  eq('清仓后账户口径收益', s5.profitAccount, 2000, 0.01);
+  eq('清仓后账户口径收益', s5.profit, 2000, 0.01);
+  eq('清仓后恒等式仍成立', s5.profit, s5.mv + s5.cash - s5.marginTotal - s5.invest, 0.01);
 }
 
 /* =========================================================

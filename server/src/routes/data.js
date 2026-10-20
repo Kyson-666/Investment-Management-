@@ -6,6 +6,7 @@ const { authRequired } = require('../middleware/auth');
 const { asyncHandler, badRequest } = require('../middleware/helpers');
 const { writeJsonBackup } = require('../services/backup');
 const { loadDemoData } = require('../services/demoData');
+const { localDate } = require('../time');
 
 const router = express.Router();
 router.use(authRequired);
@@ -34,11 +35,20 @@ const BK_PORTABLE_COLS = {
   accounts: 'id,name,kind,currency,note,created_at',
   assets: 'id,account_id,name,code,market,type,currency,price,market_value,unit_price,margin_cny,alerts_json,created_at',
   events: 'id,asset_id,date,kind,side,qty,price,amount,ratio,fee,margin_cny,fx,is_t,note,created_at',
-  snapshots: 'month,total',
+  snapshots: 'month,total,source,derived_at',
   benchmarks: 'code,date,value',
-  cashFlows: 'id,account_id,date,kind,amount,fx,input_currency,input_amount,note',
+  cashFlows: 'id,account_id,date,kind,amount,fx,input_currency,input_amount,to_account_id,to_amount,to_currency,to_fx,note',
   dcaPlans: 'id,asset_id,start_month,months,day,amount,note,active,created_at',
 };
+
+/** 单价历史没有 user_id，需 JOIN asset 取；单独处理 */
+function selectPriceHistory(db, uid, explicit) {
+  const cols = explicit
+    ? 'h.asset_id,h.date,h.unit_price,h.source'
+    : 'h.*';
+  return db.prepare(`SELECT ${cols} FROM asset_price_history h JOIN asset a ON a.id=h.asset_id
+                     WHERE a.user_id=? ORDER BY h.asset_id,h.date`).all(uid);
+}
 
 /** 安全解析用户设置 JSON */
 function readUserSettings(user) {
@@ -62,6 +72,7 @@ function buildPortablePayload(user) {
     const order = key === 'snapshots' ? ' ORDER BY month' : ' ORDER BY id';
     out[key] = db.prepare(`SELECT ${BK_PORTABLE_COLS[key]} FROM ${table} WHERE user_id=?${order}`).all(uid);
   }
+  out.priceHistory = selectPriceHistory(db, uid, true);
   return out;
 }
 
@@ -82,17 +93,18 @@ function buildFullSnapshot(uid, keys, withSettings = true) {
   for (const key of (keys || Object.keys(BK_TABLES))) {
     out[key] = db.prepare(`SELECT * FROM ${BK_TABLES[key]} WHERE user_id=?`).all(uid);
   }
+  out.priceHistory = selectPriceHistory(db, uid, false);
   return out;
 }
 
 router.get('/export', (req, res) => {
   /* 可移植导出：显式列名 + settings/fx，见 buildPortablePayload */
-  res.setHeader('Content-Disposition', `attachment; filename="invest-manager-backup-${new Date().toISOString().slice(0, 10)}.json"`);
+  res.setHeader('Content-Disposition', `attachment; filename="invest-manager-backup-${localDate()}.json"`);
   res.json(buildPortablePayload(req.user));
 });
 
 /* ---------- 导入 ---------- */
-const TABLES_USER = ['event', 'asset', 'account', 'snapshot', 'benchmark', 'cash_flow', 'dca_plan', 'notification'];
+const TABLES_USER = ['event', 'asset', 'account', 'snapshot', 'benchmark', 'cash_flow', 'dca_plan', 'notification', 'deletion_archive'];
 
 router.post('/import', asyncHandler(async (req, res) => {
   const body = req.body;
@@ -106,43 +118,90 @@ router.post('/import', asyncHandler(async (req, res) => {
   const db = getDb();
   const uid = req.user.id;
 
+  /* ---------- 预检：重复源 id + 引用完整性 ----------
+     导入是「整体替换」，必须在删除现有数据前完成校验；
+     且不能直接写源 id（account/asset/event 是全局自增主键，多用户必冲突）。 */
+  const dupCheck = (arr, label) => {
+    const seen = new Set();
+    for (const x of arr) {
+      const k = String(x.id);
+      if (seen.has(k)) return `${label} 存在重复 id：${k}`;
+      seen.add(k);
+    }
+    return null;
+  };
+  const preErr = dupCheck(body.accounts, 'accounts') || dupCheck(body.assets, 'assets') || dupCheck(body.events, 'events');
+  if (preErr) return badRequest(res, preErr);
+
+  const srcAcc = new Set(body.accounts.map(a => String(a.id)));
+  const srcAst = new Set(body.assets.map(a => String(a.id)));
+  for (const a of body.assets) {
+    if (!srcAcc.has(String(a.account_id))) return badRequest(res, `资产 #${a.id} 引用了不存在的账户 #${a.account_id}`);
+  }
+  for (const e of body.events) {
+    if (!srcAst.has(String(e.asset_id))) return badRequest(res, `流水 #${e.id} 引用了不存在的资产 #${e.asset_id}`);
+  }
+  for (const c of body.cashFlows || []) {
+    if (!srcAcc.has(String(c.account_id))) return badRequest(res, `出入金 #${c.id} 引用了不存在的账户 #${c.account_id}`);
+    if (c.to_account_id != null && !srcAcc.has(String(c.to_account_id))) {
+      return badRequest(res, `划转 #${c.id} 引用了不存在的转入账户 #${c.to_account_id}`);
+    }
+  }
+  for (const p of body.dcaPlans || []) {
+    if (!srcAst.has(String(p.asset_id))) return badRequest(res, `定投计划 #${p.id} 引用了不存在的资产 #${p.asset_id}`);
+  }
+  for (const h of body.priceHistory || []) {
+    if (!srcAst.has(String(h.asset_id))) return badRequest(res, `净值历史引用了不存在的资产 #${h.asset_id}`);
+  }
+
   // 导入前自动备份当前数据（完整快照，SELECT * 含全部列，用于回滚）
   const backupPayload = buildFullSnapshot(uid);
   const backupFile = writeJsonBackup(backupPayload, 'pre-import');
 
-  const counts = { accounts: 0, assets: 0, events: 0, fx: 0, snapshots: 0, benchmarks: 0, cashFlows: 0, dcaPlans: 0 };
+  const counts = { accounts: 0, assets: 0, events: 0, fx: 0, snapshots: 0, benchmarks: 0,
+    cashFlows: 0, dcaPlans: 0, priceHistory: 0 };
+  const astMap = new Map();
 
   const tx = db.transaction(() => {
+    /* 单价历史没有 user_id，先按当前用户资产删除 */
+    db.prepare('DELETE FROM asset_price_history WHERE asset_id IN (SELECT id FROM asset WHERE user_id=?)').run(uid);
     for (const t of TABLES_USER) db.prepare(`DELETE FROM ${t} WHERE user_id=?`).run(uid);
 
+    const insAccount = db.prepare(`INSERT INTO account (user_id,name,kind,currency,note,created_at)
+      VALUES (?,?,?,?,?,?)`);
+    const accMap = new Map();
     for (const a of body.accounts) {
-      db.prepare(`INSERT INTO account (id,user_id,name,kind,currency,note,created_at)
-                  VALUES (?,?,?,?,?,?,?)`)
-        .run(a.id, uid, a.name, a.kind || 'broker', a.currency || 'CNY', a.note || '', a.created_at || now());
+      const info = insAccount.run(uid, a.name, a.kind || 'broker', a.currency || 'CNY',
+        a.note || '', a.created_at || now());
+      accMap.set(String(a.id), info.lastInsertRowid);
       counts.accounts++;
     }
-    const accountIds = new Set(db.prepare('SELECT id FROM account WHERE user_id=?').all(uid).map(r => r.id));
+
+    const insAsset = db.prepare(`INSERT INTO asset
+      (user_id,account_id,name,code,market,type,currency,price,market_value,unit_price,margin_cny,alerts_json,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
     for (const a of body.assets) {
-      if (!accountIds.has(a.account_id)) continue;
-      db.prepare(`INSERT INTO asset
-        (id,user_id,account_id,name,code,market,type,currency,price,market_value,unit_price,margin_cny,alerts_json,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-        a.id, uid, a.account_id, a.name, a.code || '', a.market || '', a.type, a.currency,
-        a.price || 0, a.market_value || 0, a.unit_price || 0, a.margin_cny || 0,
-        a.alerts_json || null, a.created_at || now());
+      const info = insAsset.run(uid, accMap.get(String(a.account_id)), a.name, a.code || '', a.market || '',
+        a.type, a.currency, a.price || 0, a.market_value || 0, a.unit_price || 0, a.margin_cny || 0,
+        typeof a.alerts_json === 'string' ? a.alerts_json : (a.alerts_json ? JSON.stringify(a.alerts_json) : null),
+        a.created_at || now());
+      astMap.set(String(a.id), info.lastInsertRowid);
       counts.assets++;
     }
+
+    const insEvent = db.prepare(`INSERT INTO event
+      (user_id,asset_id,date,kind,side,qty,price,amount,ratio,fee,margin_cny,fx,is_t,note,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
     for (const e of body.events) {
-      db.prepare(`INSERT INTO event
-        (id,user_id,asset_id,date,kind,side,qty,price,amount,ratio,fee,margin_cny,fx,is_t,note,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-        e.id, uid, e.asset_id, e.date, e.kind, e.side || null, e.qty ?? null, e.price ?? null,
-        e.amount ?? null, e.ratio ?? null, e.fee || 0, e.margin_cny || 0,
-        e.fx || 1, e.is_t || 0, e.note || '', e.created_at || now());
+      insEvent.run(uid, astMap.get(String(e.asset_id)), e.date, e.kind, e.side || null,
+        e.qty ?? null, e.price ?? null, e.amount ?? null, e.ratio ?? null, e.fee || 0,
+        e.margin_cny || 0, e.fx || 1, e.is_t || 0, e.note || '', e.created_at || now());
       counts.events++;
     }
+
     for (const s of body.snapshots || []) {
-      db.prepare('INSERT OR REPLACE INTO snapshot (user_id,month,total) VALUES (?,?,?)').run(uid, s.month, s.total);
+      db.prepare('INSERT OR REPLACE INTO snapshot (user_id,month,total,source,derived_at) VALUES (?,?,?,?,?)')
+        .run(uid, s.month, s.total, s.source || 'manual', s.derived_at || null);
       counts.snapshots++;
     }
     for (const b of body.benchmarks || []) {
@@ -151,19 +210,32 @@ router.post('/import', asyncHandler(async (req, res) => {
       counts.benchmarks++;
     }
     for (const c of body.cashFlows || []) {
-      if (!accountIds.has(c.account_id)) continue;
-      db.prepare(`INSERT INTO cash_flow (id,user_id,account_id,date,kind,amount,fx,input_currency,input_amount,note)
-                  VALUES (?,?,?,?,?,?,?,?,?,?)`)
-        .run(c.id, uid, c.account_id, c.date, c.kind, c.amount, c.fx || 1,
-          c.input_currency || null, c.input_amount == null ? c.amount : c.input_amount, c.note || '');
+      db.prepare(`INSERT INTO cash_flow
+        (user_id,account_id,date,kind,amount,fx,input_currency,input_amount,
+         to_account_id,to_amount,to_currency,to_fx,note)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(uid, accMap.get(String(c.account_id)), c.date, c.kind, c.amount, c.fx || 1,
+          c.input_currency || null, c.input_amount == null ? c.amount : c.input_amount,
+          c.to_account_id == null ? null : accMap.get(String(c.to_account_id)),
+          c.to_amount == null ? null : c.to_amount, c.to_currency || null,
+          c.to_fx == null ? null : c.to_fx, c.note || '');
       counts.cashFlows++;
     }
     for (const p of body.dcaPlans || []) {
-      db.prepare(`INSERT INTO dca_plan (id,user_id,asset_id,start_month,months,day,amount,note,active,created_at)
-                  VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
-        p.id, uid, p.asset_id, p.start_month, p.months || 12, p.day || 15, p.amount,
+      db.prepare(`INSERT INTO dca_plan (user_id,asset_id,start_month,months,day,amount,note,active,created_at)
+                  VALUES (?,?,?,?,?,?,?,?,?)`).run(
+        uid, astMap.get(String(p.asset_id)), p.start_month, p.months || 12, p.day || 15, p.amount,
         p.note || '定投', p.active === undefined ? 1 : (p.active ? 1 : 0), p.created_at || now());
       counts.dcaPlans++;
+    }
+    for (const h of body.priceHistory || []) {
+      const aid = astMap.get(String(h.asset_id));
+      if (!aid || !(+h.unit_price > 0)) continue;
+      db.prepare(`INSERT INTO asset_price_history (asset_id,date,unit_price,source,created_at)
+                  VALUES (?,?,?,?,?)
+                  ON CONFLICT(asset_id,date) DO UPDATE SET unit_price=excluded.unit_price, source=excluded.source`)
+        .run(aid, String(h.date).slice(0, 10), +h.unit_price, h.source || 'import', now());
+      counts.priceHistory++;
     }
     // 全局汇率仅管理员可导入
     if (req.user.role === 'admin' && Array.isArray(body.fx)) {
@@ -179,6 +251,11 @@ router.post('/import', asyncHandler(async (req, res) => {
     }
   });
   tx();
+
+  /* 旧备份可能没有 priceHistory：用已导入的成交价回填，保证定投可追溯 */
+  for (const aid of astMap.values()) {
+    try { require('../services/prices').backfillFromEvents(db, aid); } catch { /* 单资产失败不影响导入 */ }
+  }
 
   /* 导入的若是在「期初建仓 fx 写死为 1」时期导出的备份，非人民币资产的期初成本仍会被低估
      → 导入后就地按建仓日汇率修正（同一判定与口径，天然幂等） */

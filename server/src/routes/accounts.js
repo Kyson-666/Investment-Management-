@@ -4,6 +4,7 @@ const express = require('express');
 const { getDb, now } = require('../db');
 const { authRequired } = require('../middleware/auth');
 const { asyncHandler, badRequest, notFound, ownedRow } = require('../middleware/helpers');
+const archive = require('../services/archive');
 
 const router = express.Router();
 router.use(authRequired);
@@ -40,6 +41,15 @@ router.put('/:id', asyncHandler(async (req, res) => {
   const kind = KINDS.includes(req.body?.kind) ? req.body.kind : row.kind;
   const currency = CCYS.includes(req.body?.currency) ? req.body.currency : row.currency;
   const note = req.body?.note !== undefined ? String(req.body.note) : row.note;
+  /* 币种一旦有资产或出入金就不可改：cash_flow.amount 恒以账户币种存储，
+     改币种会把历史金额按新币种重新解释（CNY→USD 会缩水约 7 倍）。 */
+  if (currency !== row.currency) {
+    const used = getDb().prepare(`SELECT
+      (SELECT COUNT(*) FROM asset WHERE account_id=? AND user_id=?) +
+      (SELECT COUNT(*) FROM cash_flow WHERE account_id=? AND user_id=?) AS n`)
+      .get(row.id, req.user.id, row.id, req.user.id).n;
+    if (used > 0) return badRequest(res, '该账户已有资产或出入金记录，币种不可修改；如需换币种请新建账户');
+  }
   getDb().prepare('UPDATE account SET name=?,kind=?,currency=?,note=? WHERE id=? AND user_id=?')
     .run(name, kind, currency, note, row.id, req.user.id);
   res.json(mapRow(ownedRow(getDb(), 'account', row.id, req.user.id)));
@@ -50,9 +60,15 @@ router.delete('/:id', (req, res) => {
   if (!row) return notFound(res);
   const assetCount = getDb().prepare('SELECT COUNT(*) n FROM asset WHERE account_id=? AND user_id=?')
     .get(row.id, req.user.id).n;
-  // FK ON DELETE CASCADE 会连带删除资产、事件、定投、出入金
-  getDb().prepare('DELETE FROM account WHERE id=? AND user_id=?').run(row.id, req.user.id);
-  res.json({ ok: true, deletedAssets: assetCount });
+  const db = getDb();
+  let archivedId = null;
+  /* 先归档再硬删除（同一事务）：删除仍走 FK 级联，恢复时重映射主键 */
+  db.transaction(() => {
+    const ar = archive.archiveAccount(db, req.user.id, row.id);
+    archivedId = ar ? String(ar.id) : null;
+    db.prepare('DELETE FROM account WHERE id=? AND user_id=?').run(row.id, req.user.id);
+  })();
+  res.json({ ok: true, deletedAssets: assetCount, archivedId });
 });
 
 module.exports = router;

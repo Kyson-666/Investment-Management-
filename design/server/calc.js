@@ -1,24 +1,18 @@
 /**
- * 投资管家 · 成本核算引擎（v5 参考实现）
- * 纯函数、无依赖，Node 与浏览器通用。
+ * 投资管家 · 成本与收益引擎（现行口径 v7.1）
+ * 纯函数、无依赖，Node 与浏览器通用（刻意保持单文件 UMD，可脱离 DB 单测）。
  *
- * v5 相对 v4 的口径变更（依据产品重设计）：
- *  1. 【期初建仓】新增 opening 事件：用于录入「记账开始前已持有的仓位」。
- *     计入份额与成本、计入净投入，但**不产生账户现金流**，并作为 XIRR 的初始存量。
- *  2. 【全类型份额】股票/基金/理财/债券统一走「份额 + 单位成本」框架，
- *     非股票不再只有金额，calcAsset 对任何类型都返回 qty / avgCNY。
- *  3. 【账户现金】accountCash()：现金 = 入金−出金 − (买入−融资)−申购 + (卖出−还款)+赎回 + 分红+利息。
- *     持仓口径以「持仓市值」对外展示；账户现金与融资各自独立展示，不做合成。
- *  4. 【双口径收益】
- *     - 持仓口径 profitInvest = 已实现 + 分红/利息 + 浮动（衡量投资能力，与 XIRR/TWR 同源）
- *     - 账户口径 profitAccount = 期末净值 − 有效净投入（回答「我到底赚了多少」）
- *     有效净投入 effectiveInvest = (入金−出金) + 期初建仓本金
- *  5. 【外部现金流只有出入金】月末快照存「持仓市值」，故
- *     月浮动 = 快照差 − 当月净入金；TWR 分母 = 上期总值 + 当月净入金。
- *     （v4 误用「证券买卖净额」作为外部现金流，导致出入金被当成收益）
- *  6. 【已实现口径统一】非股票赎回本金**不计入**已实现收益（v4 的 realizedByMonth 有此 bug）。
+ * 现行口径（唯一权威，旧 v4/v5 双口径已废弃）：
+ *  1. 累计投入 invest = 净入金 + 期初建仓本金 = effectiveInvest
+ *  2. 累计收益 profit = 已实现（卖出/赎回） + 分红 + 利息 + 浮动
+ *  3. 收益率 rate = profit / invest；invest <= 0 返回 null（前端显示“—”）
+ *  4. 恒等式：profit ≡ 持仓市值 + 账户现金 − 融资 − invest
+ *  5. XIRR 期末值 = 持仓市值 + 账户现金 − 融资（融资是负债，不是期末可变现资产）
+ *  6. 月末快照只存持仓市值，故月度/TWR 的外部资金流 = 证券净投入；
+ *     断档月必须累加区间内所有净投入，不能只扣当前月。
+ *  7. 所有公开函数接受 opts.asOf（YYYY-MM-DD），默认今天；未来事件不计入当前口径。
  *
- * 用法（Node）: const C = require('./calc.js'); C.summary(S, {accountId});
+ * 用法（Node）: const C = require('./calc.js'); C.summary(S, {accountId, asOf});
  * 用法（浏览器）: window.Calc
  */
 (function (root, factory) {
@@ -28,29 +22,41 @@
   'use strict';
 
   /* ---------- 工具 ---------- */
-  const TODAY = () => new Date().toISOString().slice(0, 10);
+  /** 本地日期 YYYY-MM-DD（不能用 toISOString：东八区 00:00–08:00 会退回前一天） */
+  const localDate = (d = new Date()) => {
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  };
+  const TODAY = () => localDate();
   const round2 = n => Math.round((+n || 0) * 100) / 100;
+  /** as-of 统一取值：调用方未传则按今天（所有当前口径都走这里） */
+  const asOfOf = opts => (opts && opts.asOf) || TODAY();
 
   // 默认设置
   const DEFAULTS = { costMethod: 'wavg', dividendReducesCost: false };
+
+  /** 指定日期的生效汇率（date <= atDate 的最近一条；同日 manual 优先） */
+  function fxAtDate(S, atDate) {
+    const t = atDate || TODAY();
+    const f = (S.fx || []).filter(r => r.date <= t).sort((a, b) =>
+      a.date < b.date ? -1 : a.date > b.date ? 1 : ((a.source === 'manual' ? 1 : 0) - (b.source === 'manual' ? 1 : 0)));
+    return f.length ? f[f.length - 1].rate : 7.1;
+  }
 
   /** 当前生效汇率（日期 <= 今天 的最近一条）
    *  同一日期：管理员手动(source=manual) 优先于自动源(source=auto)
    */
   function currentFx(S) {
-    const t = TODAY();
-    const f = (S.fx || []).filter(r => r.date <= t).sort((a, b) =>
-      a.date < b.date ? -1 : a.date > b.date ? 1 : ((a.source === 'manual' ? 1 : 0) - (b.source === 'manual' ? 1 : 0)));
     /* 口径与 services/fx.js 的 currentFx 一致（date<=atDate、同日 manual 优先）。
        引擎侧刻意用内存实现而非查库：calc.js 必须保持纯函数（可脱离 DB 单测）。 */
-    return f.length ? f[f.length - 1].rate : 7.1;
+    return fxAtDate(S, TODAY());
   }
   /** 资产估值汇率：人民币恒为 1，美元用最新汇率 */
   const assetFx = (a, S) => (a.currency === 'USD' ? currentFx(S) : 1);
 
-  /** 取某资产的事件（按日期升序，稳定排序） */
-  function eventsOf(S, assetId) {
-    return (S.events || []).filter(e => e.assetId === assetId)
+  /** 取某资产的事件（按日期升序，稳定排序；asOf 过滤未来事件） */
+  function eventsOf(S, assetId, asOf) {
+    return (S.events || []).filter(e => e.assetId === assetId && (!asOf || e.date <= asOf))
       .sort((x, y) => (x.date < y.date ? -1 : x.date > y.date ? 1 : 0));
   }
 
@@ -78,9 +84,9 @@
    * costMethod: 'wavg'(摊薄加权平均, 默认) | 'fifo'(先进先出)
    * dividendReducesCost: false=分红计入已实现(默认) | true=分红冲减成本
    * ========================================================= */
-  function calcAsset(a, S) {
+  function calcAsset(a, S, opts) {
     const cfg = Object.assign({}, DEFAULTS, S.settings || {});
-    const evs = eventsOf(S, a.id);
+    const evs = eventsOf(S, a.id, asOfOf(opts));
     return calcUnified(a, evs, cfg, S);
   }
 
@@ -107,6 +113,7 @@
     let marginRepaidCNY = 0;             // 累计偿还
     let marginBalance = +a.marginCNY > 0 ? +a.marginCNY : 0;   // 创建时的当前融资额
     marginBorrowedCNY += marginBalance;
+    let oversold = false;                // 卖出/赎回超过可用份额（历史脏数据或绕过校验）
     const byMonth = {};                  // { 'YYYY-MM': {sell, div, income} }
     const addM = (m, k, v) => { if (!m) return; byMonth[m] = byMonth[m] || { sell: 0, div: 0, income: 0 }; byMonth[m][k] = +(byMonth[m][k] + v).toFixed(2); };
 
@@ -140,7 +147,9 @@
         const mBorrow = +t.marginCNY > 0 ? +t.marginCNY : 0;   // 本次买入使用的融资额（CNY）
         if (mBorrow > 0) { marginBalance += mBorrow; marginBorrowedCNY += mBorrow; }
       } else if (act === 'sell' || act === 'redeem') {
-        const sellQty = tQty;
+        /* 防御：超卖不产生负份额/负市值。写入侧已校验；此处兜住历史脏数据。 */
+        const sellQty = tQty > 0 ? Math.min(tQty, Math.max(0, qty)) : 0;
+        if (tQty > qty + 1e-6) oversold = true;
         const proceedsLocal = (sellQty > 0 ? sellQty * tPrice : tAmtRaw) - fee;
         let rl = 0, rc = 0;
         if (sellQty > 0) {
@@ -244,6 +253,9 @@
       costLocal: round2(costLocal), costCNY: round2(costCNY),
       mvLocal: round2(mvLocal), mvCNY: round2(mvCNY),
       realLocal: round2(realLocal), realCNY: round2(realCNY),
+      /* 资产级“已实现”合计：卖出/赎回已实现 + 分红 + 利息。
+         与 summary.real 同义；解决“资产卡已实现 0、首页已实现 500”的同名不同义。 */
+      realTotalCNY: round2(realCNY + divCNY + incomeCNY),
       feeTotalLocal: round2(feeTotalLocal), feeTotalCNY: round2(feeTotalCNY),
       marginBorrowedCNY: round2(marginBorrowedCNY), marginRepaidCNY: round2(marginRepaidCNY),
       marginCNY, netValueCNY, selfCostCNY,
@@ -260,7 +272,12 @@
       /* fxUsed 为当前汇率（兼容旧字段名）；fxCost 为「当前持仓成本的实际折算汇率」，
          即 成本(CNY) ÷ 成本(原币)。USD 资产在历史汇率与当前汇率不同时，两者会不等，
          卡片应展示 fxCost（成本锁定汇率）而非当前汇率。 */
-      rate: netInvestCNY > 0 ? totalCNY / netInvestCNY : 0, fxUsed: fxNow,
+      /* 收益率：优先按证券净投入（可增可减）；本金已收回时退回“总收益/剩余成本”；
+         清仓且无成本时返回 null（前端显示“—”），不再用 0 冒充。 */
+      rate: netInvestCNY > 0 ? totalCNY / netInvestCNY
+        : (costCNY > 1e-9 ? totalCNY / costCNY : null),
+      oversold,
+      fxUsed: fxNow,
       fxCost: costLocal > 1e-9 ? round2(costCNY / costLocal * 10000) / 10000 : fxNow, byMonth
     };
   }
@@ -280,30 +297,73 @@
    */
   function accountCash(S, opts) {
     const accId = opts && opts.accountId;
+    const asOf = asOfOf(opts);
     const inAcc = x => !accId || x.accountId === accId;
-    let cash = 0, dep = 0, wd = 0, openCost = 0, marginBal = 0;
-    (S.cashFlows || []).filter(inAcc).forEach(c => {
-      const v = (c.amount || 0) * (c.fx || 1);
-      if (c.kind === 'deposit') { dep += v; cash += v; } else { wd += v; cash -= v; }
+    const accCurOf = id => {
+      const a = (S.accounts || []).find(x => x.id === id);
+      return a && a.currency === 'USD' ? 'USD' : 'CNY';
+    };
+    let cash = 0, dep = 0, wd = 0, openCost = 0, marginBal = 0, adjust = 0;
+    let transferIn = 0, transferOut = 0;
+    const byCcy = { CNY: 0, USD: 0 };
+    /* 现金流水：deposit/withdraw 是外部现金流；transfer 是内部划转（两条腿）；
+       adjust 是现金校准（正=盘盈，负=盘亏，计入已实现的其他损益）。 */
+    (S.cashFlows || []).filter(c => String(c.date) <= asOf &&
+      (!accId || c.accountId === accId || c.toAccountId === accId)).forEach(c => {
+      const f = c.fx || 1;
+      const srcCur = accCurOf(c.accountId);
+      const dstCur = c.toAccountId ? accCurOf(c.toAccountId) : null;
+      const srcIn = !accId || c.accountId === accId;
+      const dstIn = !accId || c.toAccountId === accId;
+      if (c.kind === 'deposit') {
+        const v = (c.amount || 0) * f;
+        dep += v; cash += v; byCcy[srcCur] += (c.amount || 0);
+      } else if (c.kind === 'withdraw') {
+        const v = (c.amount || 0) * f;
+        wd += v; cash -= v; byCcy[srcCur] -= (c.amount || 0);
+      } else if (c.kind === 'transfer') {
+        if (srcIn) {
+          const v = (c.amount || 0) * f;
+          transferOut += v;
+          cash -= v;
+          byCcy[srcCur] -= (c.amount || 0);
+        }
+        if (dstIn && c.toAccountId) {
+          const tf = c.toFx || 1;
+          const v = (c.toAmount || 0) * tf;
+          transferIn += v;
+          cash += v;
+          byCcy[dstCur] += (c.toAmount || 0);
+        }
+      } else if (c.kind === 'adjust') {
+        const v = (c.amount || 0) * f;
+        cash += v; adjust += v; byCcy[srcCur] += (c.amount || 0);
+      }
     });
     (S.assets || []).filter(inAcc).forEach(a => {
+      const accCur = accCurOf(a.accountId);
       /* 融资时序演进（与 calcUnified 一致）：
          期初融资 + 各笔买入融资 − 卖出所得优先偿还部分 */
       let mBal = +a.marginCNY > 0 ? +a.marginCNY : 0;
-      eventsOf(S, a.id).forEach(e => {
+      eventsOf(S, a.id, asOf).forEach(e => {
         const act = actionOf(e);
         const f = e.fx || 1;
         const tQty = +e.qty || 0, tAmt = e.amount != null ? +e.amount || 0 : 0;
         const px = +e.price || (tQty > 0 ? tAmt / tQty : 0);
         const gross = tQty > 0 ? tQty * px : tAmt;
         const fee = e.fee || 0;
+        /* 账户币种口径的金额：资产币种 → CNY（事件汇率）→ 账户币种（当日汇率） */
+        const accFx = accCur === 'USD' ? fxAtDate(S, e.date) : 1;
+        const toAcc = amtCcy => (a.currency === accCur ? amtCcy : (amtCcy * f) / accFx);
         switch (act) {
           case 'opening': openCost += (gross + fee) * f; break;       // 不产生现金流
           case 'buy': case 'invest': {
             /* 融资部分由券商直接支付，不占用账户现金 → 现金只扣「自付」 */
             const mb = +e.marginCNY > 0 ? +e.marginCNY : 0;
             mBal += mb;
-            cash -= (gross + fee) * f - mb;
+            const selfPayCNY = (gross + fee) * f - mb;
+            cash -= selfPayCNY;
+            byCcy[accCur] -= (a.currency === accCur ? (gross + fee) : ((gross + fee) * f) / accFx) - mb / accFx;
             break;
           }
           case 'sell': case 'redeem': {
@@ -312,21 +372,37 @@
             const repay = Math.min(proceeds > 0 ? proceeds : 0, mBal);
             if (repay > 0) mBal -= repay;
             cash += proceeds - repay;
+            byCcy[accCur] += toAcc(gross - fee) - repay / accFx;
             break;
           }
-          case 'div': case 'income': cash += tAmt * f; break;
+          case 'div': case 'income':
+            cash += tAmt * f;
+            byCcy[accCur] += toAcc(tAmt);
+            break;
           default: break;                                            // bonus / split 不影响现金
         }
       });
       marginBal += mBal;
     });
+    const fxNow = fxAtDate(S, asOf);
+    const cashCurrent = round2(byCcy.CNY + byCcy.USD * fxNow);
     return {
       cash: round2(cash), deposit: round2(dep), withdraw: round2(wd),
       netDeposit: round2(dep - wd),          // 净入金（仅出入金）
       net: round2(dep - wd),                 // ★ 兼容旧字段名（= 净入金）
       openingCost: round2(openCost),         // 期初建仓本金
       marginBalance: round2(marginBal),      // 融资合计（欠券商，尚未偿还）
-      effectiveInvest: round2(dep - wd + openCost)   // 有效净投入 = 净入金 + 期初建仓本金
+      /* 账户视角：内部划转是“资金进出该账户”，需计入该账户的有效投入；
+         组合视角：划转两边抵消，不计入累计投入。 */
+      transferInCNY: round2(transferIn),
+      transferOutCNY: round2(transferOut),
+      effectiveInvest: round2(dep - wd + openCost + (accId ? transferIn - transferOut : 0)),
+      /* 现金的“当前价值”与汇兑差额：仅展示，不改变累计收益口径。
+         账户现金按发生日汇率记账（与成本锁定一致），cashCurrent 按当前汇率重估。 */
+      cashByCcy: { CNY: round2(byCcy.CNY), USD: round2(byCcy.USD) },
+      cashCurrent,
+      cashFxGain: round2(cashCurrent - cash),
+      adjustCNY: round2(adjust)
     };
   }
   /**
@@ -364,39 +440,18 @@
   }
 
   /**
-   * 指定日期的**剩余持仓成本**合计（CNY，加权平均口径，重放到 asOfDate 含当日）。
+   * 指定日期的**剩余持仓成本**合计（CNY，重放到 asOfDate 含当日）。
+   * 直接复用 calcUnified，因此自动继承当前设置的成本法（wavg/FIFO）与分红冲减口径。
    * 用于「年初浮动 = 上年末快照市值 − 上年末剩余成本」。
-   * 说明：仅按加权平均结转（默认口径），不做 FIFO 批次结转。
    */
   function costBasisAt(S, asOfDate, opts) {
     const accId = opts && opts.accountId;
+    const cfg = Object.assign({}, DEFAULTS, S.settings || {});
     const inAcc = x => !accId || x.accountId === accId;
     let total = 0;
     (S.assets || []).filter(inAcc).forEach(a => {
-      let qty = 0, cost = 0;
-      eventsOf(S, a.id).forEach(e => {
-        if (e.date > asOfDate) return;
-        const act = actionOf(e);
-        const f = e.fx || 1;
-        const tQty = +e.qty || 0, tAmt = e.amount != null ? +e.amount || 0 : 0;
-        const px = +e.price || (tQty > 0 ? tAmt / tQty : 0);
-        const gross = tQty > 0 ? tQty * px : tAmt;
-        const fee = e.fee || 0;
-        if (act === 'opening' || act === 'buy' || act === 'invest') {
-          const q = act === 'opening' ? (tQty > 0 ? tQty : 1) : tQty;
-          qty += q; cost += (gross + fee) * f;
-        } else if (act === 'sell' || act === 'redeem') {
-          if (tQty > 0 && qty > 1e-9) {
-            const per = cost / qty;
-            const take = Math.min(tQty, qty);
-            cost -= per * take; qty -= take;
-          } else if (cost > 0) {
-            /* 金额口径赎回：按金额占比结转 */
-            cost = Math.max(0, cost - (gross - fee) * f);
-          }
-        }
-      });
-      total += Math.max(0, cost);
+      const evs = eventsOf(S, a.id, asOfDate);
+      total += calcUnified(a, evs, cfg, S).costCNY;
     });
     return round2(total);
   }
@@ -410,31 +465,31 @@
   /* =========================================================
    * 账户维度
    * ========================================================= */
-  function accountSummary(S) {
+  function accountSummary(S, opts) {
     const out = (S.accounts || []).map(acc => {
       const assets = S.assets.filter(a => a.accountId === acc.id);
       let mv = 0, netInvest = 0, profitInvest = 0, accFee = 0, accMargin = 0;
       assets.forEach(a => {
-        const r = calcAsset(a, S);
+        const r = calcAsset(a, S, opts);
         mv += r.mvCNY; profitInvest += assetTotal(r);
         netInvest += r.netInvestCNY;
         accFee += r.feeTotalCNY || 0;                 // 该账户累计手续费
         accMargin += r.marginCNY || 0;                // 该账户融资（欠券商）
       });
-      const cf = accountCash(S, { accountId: acc.id });
-      const profit = round2(profitInvest);          // 累计收益（单一，= 已实现+分红+利息+浮动）
-      const invest = cf.netDeposit;                 // 累计投入 = 净入金
+      const cf = accountCash(S, Object.assign({}, opts, { accountId: acc.id }));
+      const profit = round2(profitInvest + (cf.adjustCNY || 0));  // 含现金校准（其他损益）
+      const invest = cf.effectiveInvest;            // 累计投入 = 净入金 + 期初建仓本金
       return {
         account: acc, count: assets.length,
-        mv: round2(mv), cash: cf.cash,
+        mv: round2(mv), cash: cf.cash, cashCurrent: cf.cashCurrent,
         netDeposit: cf.netDeposit, openingCost: cf.openingCost, effectiveInvest: cf.effectiveInvest,
         netInvest: round2(netInvest),
+        cashAdjust: round2(cf.adjustCNY || 0),
         feeTotal: round2(accFee),             // 该账户累计手续费
         margin: round2(accMargin),            // 该账户融资（欠券商）
-        profit, profitInvest: profit, profitAccount: profit,   // 兼容别名
+        profit,
         invest,
-        rate: invest > 0 ? profit / invest : 0,
-        accountRate: invest > 0 ? profit / invest : 0
+        rate: invest > 0 ? profit / invest : null
       };
     });
     const all = out.reduce((s, x) => ({
@@ -447,19 +502,18 @@
       total: {
         mv: round2(all.mv), cash: round2(all.cash),
         invest: round2(all.invest), netInvest: round2(all.netInvest),
-        profit: round2(all.profit), profitInvest: round2(all.profit), profitAccount: round2(all.profit),
-        rate: all.invest > 0 ? all.profit / all.invest : 0,
-        accountRate: all.invest > 0 ? all.profit / all.invest : 0
+        profit: round2(all.profit),
+        rate: all.invest > 0 ? all.profit / all.invest : null
       }
     };
   }
 
   /** 同一证券跨账户合并（按 market+code，无代码则按名称） */
-  function securityAggregation(S) {
+  function securityAggregation(S, opts) {
     const key = a => (a.market || '') + '|' + (a.code || a.name);
     const map = {};
     S.assets.forEach(a => {
-      const r = calcAsset(a, S), k = key(a);
+      const r = calcAsset(a, S, opts), k = key(a);
       map[k] = map[k] || { name: a.name, code: a.code, market: a.market, type: a.type, currency: a.currency,
         qty: 0, costCNY: 0, mvCNY: 0, totalCNY: 0, accounts: [] };
       const m = map[k];
@@ -471,7 +525,7 @@
       ...m, qty: +m.qty.toFixed(6), costCNY: round2(m.costCNY), mvCNY: round2(m.mvCNY), totalCNY: round2(m.totalCNY),
       avgCNY: m.qty > 0 ? m.costCNY / m.qty : 0,
       unrealCNY: round2(m.mvCNY - m.costCNY),
-      rate: m.costCNY > 0 ? m.totalCNY / m.costCNY : 0
+      rate: m.costCNY > 0 ? m.totalCNY / m.costCNY : null
     }));
   }
 
@@ -484,7 +538,7 @@
     let mv = 0, real = 0, unreal = 0, cashIncome = 0, netInvest = 0, buyTotal = 0;
     let feeTotal = 0, marginTotal = 0, netValueTotal = 0, selfCostTotal = 0;
     const rows = assets.map(a => {
-      const r = calcAsset(a, S);
+      const r = calcAsset(a, S, opts);
       mv += r.mvCNY || 0;
       feeTotal += r.feeTotalCNY || 0;
       marginTotal += r.marginCNY || 0;
@@ -498,25 +552,26 @@
       return { a, r, mv: r.mvCNY || 0, profit: assetTotal(r) };
     });
     const cf = accountCash(S, opts);
-    /* v6 单一口径（用户定义）：
-     *   累计投入 = 净入金（入金 − 出金）        —— 期初建仓本金**不计入**
-     *   累计收益 = 已实现 + 分红 + 利息 + 浮动  —— 唯一口径，不再区分「账户/持仓」
+    /* 单一口径（本次统一）：
+     *   累计投入 = 净入金 + 期初建仓本金 = effectiveInvest
+     *   累计收益 = 已实现 + 分红 + 利息 + 浮动
+     *   收益率   = 累计收益 ÷ 累计投入（<=0 时 null，前端显示“—”）
      */
-    const profit = round2(real + unreal);
-    const invest = cf.netDeposit;
-    /* 注：v1.0.4 起取消「总资产」概念，持仓口径以「持仓市值」对外展示；
-       现金与融资分别由 cash / marginTotal 单独给出，不做合成。 */
+    const cashAdjust = cf.adjustCNY || 0;
+    const totalReal = round2(real + cashAdjust);       // 已实现 + 现金校准（其他损益）
+    const profit = round2(totalReal + unreal);
+    const invest = cf.effectiveInvest;
+    const netWorth = round2(mv + cf.cash - marginTotal);
     return {
       /* 持仓构成 */
       total: round2(mv),                    // 兼容旧字段名（= 持仓市值）
       mv: round2(mv),
-      real: round2(real), unreal: round2(unreal), cashIncome: round2(cashIncome),
+      real: totalReal, unreal: round2(unreal), cashIncome: round2(cashIncome),
+      cashAdjust: round2(cashAdjust),
       /* 单一口径三件套 */
-      invest,                               // 累计投入 = 净入金
+      invest,                               // 累计投入 = 净入金 + 期初建仓
       profit,                               // 累计收益（唯一口径）
-      rate: invest > 0 ? profit / invest : 0,
-      /* 兼容别名（v5 双口径字段，现均指向同一值） */
-      profitInvest: profit, profitAccount: profit, accountRate: invest > 0 ? profit / invest : 0,
+      rate: invest > 0 ? profit / invest : null,
       /* 诊断用（管理页/告警） */
       netDeposit: cf.netDeposit, openingCost: cf.openingCost, effectiveInvest: cf.effectiveInvest,
       netInvest: round2(netInvest),         // 证券净投入（可增可减）
@@ -527,6 +582,13 @@
       netValueTotal: round2(netValueTotal), // 实际净值合计 = 持仓市值 − 融资
       selfCostTotal: round2(selfCostTotal), // 自付本金合计 = 持仓成本 − 融资
       cash: cf.cash,
+      cashCurrent: cf.cashCurrent,
+      cashByCcy: cf.cashByCcy,
+      cashFxGain: cf.cashFxGain,
+      realizableTotal: round2(mv + cf.cash),
+      netWorth,
+      /* 恒等式校验：profit 应等于 netWorth − invest（误差 <= 0.01） */
+      identityDiff: round2(profit - (netWorth - invest)),
       rows
     };
   }
@@ -534,28 +596,37 @@
   /** 月度已实现收益（口径统一：赎回本金不计入） */
   function realizedByMonth(S, opts) {
     const accountId = opts && opts.accountId;
+    const asOf = asOfOf(opts);
     const m = {}; const add = (k, v) => { if (k) m[k] = +((m[k] || 0) + v).toFixed(2); };
     S.assets.filter(a => !accountId || a.accountId === accountId).forEach(a => {
-      const r = calcAsset(a, S);
+      const r = calcAsset(a, S, opts);
       for (const mm in r.byMonth) add(mm, r.byMonth[mm].sell + r.byMonth[mm].div + (r.byMonth[mm].income || 0));
+    });
+    /* 现金校准计入“其他损益”，否则现金变了但收益不变，恒等式会失衡 */
+    (S.cashFlows || []).filter(c => c.kind === 'adjust' && String(c.date) <= asOf &&
+      (!accountId || c.accountId === accountId)).forEach(c => {
+      add(String(c.date).slice(0, 7), (c.amount || 0) * (c.fx || 1));
     });
     return m;
   }
   /** 月度外部现金流：仅出入金（快照为「持仓市值」，故买卖/申赎属账户内部转移） */
   function netDepositByMonth(S, opts) {
     const accountId = opts && opts.accountId;
+    const asOf = asOfOf(opts);
     const m = {}; const add = (k, v) => { if (k) m[k] = +((m[k] || 0) + v).toFixed(2); };
-    (S.cashFlows || []).filter(c => !accountId || c.accountId === accountId).forEach(c => {
-      add(String(c.date).slice(0, 7), (c.kind === 'deposit' ? 1 : -1) * (c.amount || 0) * (c.fx || 1));
-    });
+    (S.cashFlows || []).filter(c => (!accountId || c.accountId === accountId) && String(c.date) <= asOf)
+      .forEach(c => {
+        add(String(c.date).slice(0, 7), (c.kind === 'deposit' ? 1 : -1) * (c.amount || 0) * (c.fx || 1));
+      });
     return m;
   }
   /** 月度证券净投入（买入−卖出 / 申购−赎回，含期初建仓）：仅用于展示 */
   function netInvestByMonth(S, opts) {
     const accountId = opts && opts.accountId;
+    const asOf = asOfOf(opts);
     const m = {}; const add = (k, v) => { if (k) m[k] = +((m[k] || 0) + v).toFixed(2); };
     S.assets.filter(a => !accountId || a.accountId === accountId).forEach(a => {
-      eventsOf(S, a.id).forEach(t => {
+      eventsOf(S, a.id, asOf).forEach(t => {
         const act = actionOf(t), f = t.fx || 1;
         const tQty = +t.qty || 0, tAmt = t.amount != null ? +t.amount || 0 : 0;
         const px = +t.price || (tQty > 0 ? tAmt / tQty : 0);
@@ -568,27 +639,38 @@
     return m;
   }
   function monthRows(S, opts) {
+    const asOf = asOfOf(opts);
     const real = realizedByMonth(S, opts);
     const net = netInvestByMonth(S, opts);        // ★ 月末快照为「持仓市值」，故外部资金流 = 证券净投入
     const netDep = netDepositByMonth(S, opts);    // 出入金（独立展示，不参与浮动收益）
-    const snap = {}; (S.snapshots || []).forEach(s => snap[s.month] = s.total);
+    const snap = {}; (S.snapshots || []).forEach(s => {
+      if (String(s.month) <= asOf.slice(0, 7)) snap[s.month] = s.total;
+    });
     const months = [...new Set([...Object.keys(real), ...Object.keys(snap), ...Object.keys(net), ...Object.keys(netDep)])].sort();
-    const out = []; let prev = null;
+    /* 断档月的资金流必须累加：prevSnap 与当前快照之间可能隔了多个月，
+       那些月份里的买入/申购会改变持仓市值，若不扣减会被误算成浮动收益。 */
+    const flowBetween = (fromExclusive, toInclusive) => {
+      let sum = 0;
+      for (const k of months) if (k > fromExclusive && k <= toInclusive) sum += (net[k] || 0);
+      return round2(sum);
+    };
+    const out = []; let prev = null, prevMonth = null;
     for (const mm of months) {
-      const s = snap[mm]; let pureFloat = null, floatTotal = null;
+      const s = snap[mm];
+      let pureFloat = null, floatTotal = null, flow = 0;
       if (s !== undefined && prev !== null) {
-        /* 纯浮动 = 快照差 − 证券净投入（快照为「持仓市值」，故买卖/申赎不计入浮动） */
-        pureFloat = round2((s - prev) - (net[mm] || 0));
-        /* 含浮动（规格 §7）：= 当月已实现 + 纯浮动。
-           卖出/分红不改变持仓市值，故与纯浮动相加**不构成重复计算**。 */
+        flow = flowBetween(prevMonth, mm);
+        /* 纯浮动 = 快照差 − 区间证券净投入（快照为「持仓市值」，买卖/申赎不计入浮动） */
+        pureFloat = round2((s - prev) - flow);
+        /* 含浮动 = 当月已实现 + 纯浮动。卖出/分红不改变持仓市值，不构成重复计算。 */
         floatTotal = round2((real[mm] || 0) + pureFloat);
       }
       out.push({ month: mm, real: round2(real[mm] || 0),
         net: round2(net[mm] || 0),              // 证券净投入（保持原名，向后兼容）
-        netDeposit: round2(netDep[mm] || 0),    // 出入金（新增，独立展示）
-        snap: s, pureFloat, floatTotal,
+        netDeposit: round2(netDep[mm] || 0),    // 出入金（独立展示）
+        flow, snap: s, pureFloat, floatTotal,
         total: floatTotal });                   // 当月总收益 = 含浮动
-      if (s !== undefined) prev = s;
+      if (s !== undefined) { prev = s; prevMonth = mm; }
     }
     return out;
   }
@@ -645,7 +727,7 @@
    *  真正的外部现金流只有两类：
    *    ① 出入金（入金=流出为负，出金=流入为正）
    *    ② 期初建仓本金（记账开始前已投入 → 视为初始流出）
-   *  期末流入 = 持仓市值 + 账户现金（真实可变现总值）。
+   *  期末流入 = 持仓市值 + 账户现金 − 融资（真实可变现净值）。
    *  兼容：若用户完全没有记录出入金与期初建仓（数据不完整），退回「证券流水口径」近似，
    *  以免 XIRR 因缺少初始流出而失真。
    */
@@ -656,17 +738,32 @@
     const flows = [];
 
     const cf = accountCash(S, opts);
-    const hasCashRecords = (cf.deposit + cf.withdraw) > 1e-9 || cf.openingCost > 1e-9;
+    const hasCashRecords = (cf.deposit + cf.withdraw) > 1e-9 || cf.openingCost > 1e-9
+      || (accountId && (cf.transferInCNY + cf.transferOutCNY) > 1e-9);
     const s = summary(S, opts);
 
     if (hasCashRecords) {
       /* ── 现金口径（推荐，数据完整时）── */
-      (S.cashFlows || []).filter(inAcc).forEach(c => {
-        const v = (c.amount || 0) * (c.fx || 1);
-        flows.push({ date: c.date, amount: c.kind === 'deposit' ? -v : v, assetId: null, kind: c.kind });
+      (S.cashFlows || []).filter(c => String(c.date) <= asOf &&
+        (!accountId || c.accountId === accountId || c.toAccountId === accountId)).forEach(c => {
+        const f = c.fx || 1;
+        if (c.kind === 'deposit') {
+          flows.push({ date: c.date, amount: -(c.amount || 0) * f, assetId: null, kind: c.kind });
+        } else if (c.kind === 'withdraw') {
+          flows.push({ date: c.date, amount: (c.amount || 0) * f, assetId: null, kind: c.kind });
+        } else if (c.kind === 'transfer' && accountId) {
+          /* 组合视角内部划转不构成外部现金流；账户视角则是该账户的资金进出 */
+          if (c.accountId === accountId && c.toAccountId !== accountId) {
+            flows.push({ date: c.date, amount: -(c.amount || 0) * f, assetId: null, kind: 'transfer_out' });
+          }
+          if (c.toAccountId === accountId && c.accountId !== accountId) {
+            flows.push({ date: c.date, amount: (c.toAmount || 0) * (c.toFx || 1), assetId: null, kind: 'transfer_in' });
+          }
+        }
+        /* adjust 是现金校准，不是外部投入；期末现金已包含它 */
       });
       (S.assets || []).filter(inAcc).forEach(a => {
-        eventsOf(S, a.id).forEach(e => {
+        eventsOf(S, a.id, asOf).forEach(e => {
           if (actionOf(e) !== 'opening') return;
           const f = e.fx || 1, tQty = +e.qty || 0, tAmt = e.amount != null ? +e.amount || 0 : 0;
           const px = +e.price || (tQty > 0 ? tAmt / tQty : 0);
@@ -675,15 +772,16 @@
         });
       });
       flows.sort((x, y) => (x.date < y.date ? -1 : x.date > y.date ? 1 : 0));
-      /* 期末流入必须取**真实可变现总值**（持仓市值 + 账户现金），
+      /* 期末流入必须取**真实可变现总值**（持仓市值 + 账户现金 − 融资），
          也不能用任何「投入 + 收益」的合成口径 —— 存在期初建仓时它会少算本金，
-         导致 XIRR 严重失真（实测：仅期初建仓 1 万→现值 1.2 万，用合成口径得 −80%，实际应为 +20%）。 */
-      const realizable = round2(s.mv + s.cash);
-      if (realizable > 1e-9) flows.push({ date: asOf, amount: realizable, assetId: null, terminal: true, kind: 'realizable' });
+         导致 XIRR 严重失真（实测：仅期初建仓 1 万→现值 1.2 万，用合成口径得 −80%，实际应为 +20%）。
+         融资是负债：期末若持有 200 市值、欠券商 100，真实可变现只有 100。 */
+      const realizable = round2(s.mv + s.cash - s.marginTotal);
+      if (Math.abs(realizable) > 1e-9) flows.push({ date: asOf, amount: realizable, assetId: null, terminal: true, kind: 'realizable' });
     } else {
       /* ── 兼容口径：未记录出入金时，按证券流水近似 ── */
       (S.assets || []).filter(inAcc).forEach(a => {
-        eventsOf(S, a.id).forEach(e => {
+        eventsOf(S, a.id, asOf).forEach(e => {
           const f = e.fx || 1, act = actionOf(e);
           const tQty = +e.qty || 0, tAmt = e.amount != null ? +e.amount || 0 : 0;
           const px = +e.price || (tQty > 0 ? tAmt / tQty : 0);
@@ -706,29 +804,31 @@
     if (flows[0].amount >= 0) flows.unshift({ date: flows[0].date, amount: -1e-6 });
     return xirr(flows);
   }
-  /** 简单年化：（1+累计收益率）^(365/持有天数) - 1 */
+  /** 简单年化：（1+累计收益率）^(365/持有天数) - 1；收益率为 null 时返回 null */
   function annualized(total, days) {
-    if (!(days > 0) || 1 + total <= 0) return null;
+    if (total == null || !(days > 0) || 1 + total <= 0) return null;
     return Math.pow(1 + total, 365 / days) - 1;
   }
-  /** 组合持有天数（首笔事件或期初建仓 → 今天） */
+  /** 组合持有天数（首笔事件或期初建仓 → asOf） */
   function holdingDays(S, opts) {
     const accountId = opts && opts.accountId;
+    const asOf = asOfOf(opts);
     let first = null;
     (S.assets || []).filter(a => !accountId || a.accountId === accountId).forEach(a => {
-      const e = eventsOf(S, a.id)[0]; if (e && (!first || e.date < first)) first = e.date;
+      const e = eventsOf(S, a.id, asOf)[0]; if (e && (!first || e.date < first)) first = e.date;
     });
     if (!first) return 0;
-    return Math.max(1, Math.round((new Date(TODAY()) - new Date(first)) / 86400000));
+    return Math.max(1, Math.round((new Date(asOf) - new Date(first)) / 86400000));
   }
 
-  /* ---------- TWR：时间加权收益率（月末快照序列，外部现金流=出入金） ---------- */
+  /* ---------- TWR：时间加权收益率（月末快照序列，外部现金流=证券净投入） ---------- */
   function twr(S, opts) {
     const rows = monthRows(S, opts).filter(r => r.snap !== undefined);
     if (rows.length < 2) return null;
     let factor = 1;
     for (let i = 1; i < rows.length; i++) {
-      const denom = rows[i - 1].snap + (rows[i].net || 0);
+      /* flow 已包含断档月区间内的累计净投入，不能只用当前月 net */
+      const denom = rows[i - 1].snap + (rows[i].flow || 0);
       if (denom > 0) factor *= rows[i].snap / denom;
     }
     return factor - 1;
@@ -748,7 +848,11 @@
         tgtAmt: round2(total * (tg[t] || 0)), diff: round2(total * (tg[t] || 0) - cur) };
     });
     const drift = rows.reduce((a, r) => a + Math.abs(r.diff), 0) / 2;
-    return { total: round2(total), cash: s.cash, rows, drift: round2(drift), driftPct: total > 0 ? drift / total : 0 };
+    return {
+      scope: 'securities',                 // 仅证券持仓；账户现金不参与目标比例
+      total: round2(total), cash: s.cash, cashCurrent: s.cashCurrent,
+      rows, drift: round2(drift), driftPct: total > 0 ? drift / total : 0
+    };
   }
 
   /* ---------- 集中度 & 风险 ---------- */
@@ -766,7 +870,7 @@
     if (list[0] && list[0].pct > warnSingle) alerts.push(`单标的集中：${list[0].name} 占 ${(list[0].pct * 100).toFixed(1)}%（阈值 ${(warnSingle * 100)}%）`);
     if (top5 > warnTop5) alerts.push(`前5大持仓合计 ${(top5 * 100).toFixed(1)}%（阈值 ${(warnTop5 * 100)}%）`);
     if (byType.stock > 0.7) alerts.push(`股票类占比 ${(byType.stock * 100).toFixed(1)}%，权益风险偏高`);
-    return { list, top1: list[0] ? list[0].pct : 0, top5, byType, warnSingle, warnTop5, alerts };
+    return { scope: 'securities', list, top1: list[0] ? list[0].pct : 0, top5, byType, warnSingle, warnTop5, alerts };
   }
 
   /* ---------- 基准对比 ---------- */
@@ -778,34 +882,46 @@
     const b0 = bAt(first.month), b1 = bAt(last.month);
     let nav = 1; const series = [];
     snaps.forEach((r, i) => {
-      if (i > 0) { const denom = snaps[i - 1].snap + (r.net || 0); if (denom > 0) nav *= r.snap / denom; }
+      if (i > 0) { const denom = snaps[i - 1].snap + (r.flow || 0); if (denom > 0) nav *= r.snap / denom; }
       series.push({ month: r.month, port: nav - 1, bench: b0 && bAt(r.month) ? bAt(r.month) / b0 - 1 : null });
     });
-    const portRet = b0 ? nav - 1 : null;
+    const portRet = nav - 1;
     const benchRet = b0 && b1 ? b1 / b0 - 1 : null;
     return { portRet, benchRet, alpha: (portRet != null && benchRet != null) ? portRet - benchRet : null, series };
   }
 
   /* ---------- 税务估算 ---------- */
   const TAX_DEFAULT = { cnDiv: { le1m: 0.20, m1to1y: 0.10, gt1y: 0 }, cnCapGain: 0, usDiv: 0.30, usCapGain: 0 };
-  /** 按市场汇总已实现资本利得（均价法，逐年） */
+  /** 按市场汇总已实现资本利得（均价法，逐年；覆盖股票/基金/理财/债券的卖出与赎回） */
   function realizedGainsByYear(S, opts) {
     const accountId = opts && opts.accountId;
+    const asOf = asOfOf(opts);
     const out = { CN: {}, US: {} };
-    (S.assets || []).filter(a => a.type === 'stock' && (!accountId || a.accountId === accountId)).forEach(a => {
-      const mk = a.market === 'US' ? 'US' : 'CN';
+    (S.assets || []).filter(a => !accountId || a.accountId === accountId).forEach(a => {
+      const mk = (a.market === 'US' || a.currency === 'USD') ? 'US' : 'CN';
       let qty = 0, costCNY = 0;
-      eventsOf(S, a.id).forEach(e => {
+      eventsOf(S, a.id, asOf).forEach(e => {
         const f = e.fx || 1;
         const act = actionOf(e);
-        const tQty = +e.qty || 0;
-        const px = +e.price || 0;
-        if (act === 'opening') { qty += tQty; costCNY += (tQty * px + (e.fee || 0)) * f; }
-        else if (act === 'buy') { qty += tQty; costCNY += (tQty * px + (e.fee || 0)) * f; }
-        else if (act === 'sell') {
-          const avg = qty > 0 ? costCNY / qty : 0;
-          const gain = ((tQty * px) - (e.fee || 0)) * f - avg * tQty;
-          costCNY -= avg * tQty; qty -= tQty;
+        const tQty = +e.qty || 0, tAmt = e.amount != null ? +e.amount || 0 : 0;
+        const px = +e.price || (tQty > 0 ? tAmt / tQty : 0);
+        const gross = tQty > 0 ? tQty * px : tAmt;
+        const fee = e.fee || 0;
+        if (act === 'opening' || act === 'buy' || act === 'invest') {
+          qty += tQty; costCNY += (gross + fee) * f;
+        } else if (act === 'sell' || act === 'redeem') {
+          const proceedsCNY = (gross - fee) * f;
+          let gain = 0;
+          if (tQty > 0 && qty > 1e-9) {
+            const avg = costCNY / qty;
+            const take = Math.min(tQty, qty);
+            gain = proceedsCNY - avg * take;
+            costCNY -= avg * take; qty -= take;
+          } else if (costCNY > 0) {
+            const ratio = Math.min(1, proceedsCNY / costCNY);
+            gain = proceedsCNY - costCNY * ratio;
+            costCNY -= costCNY * ratio; qty = 0;
+          }
           const y = String(e.date).slice(0, 4);
           out[mk][y] = round2((out[mk][y] || 0) + gain);
         } else if (act === 'bonus') qty += tQty;
@@ -814,25 +930,82 @@
     });
     return out;
   }
+
+  /**
+   * 指定日期的持仓批次（FIFO 口径），仅用于分红税按批次分摊。
+   * 金额口径（无 qty）的赎回无法精确拆分批次，按“全部赎回”处理。
+   */
+  function lotsAt(a, S, asOfDate) {
+    const lots = [];
+    eventsOf(S, a.id, asOfDate).forEach(e => {
+      const act = actionOf(e);
+      const q = +e.qty || 0;
+      if (act === 'opening' || act === 'buy' || act === 'invest') {
+        if (q > 0) lots.push({ q, date: e.date });
+      } else if (act === 'sell' || act === 'redeem') {
+        if (q > 0) {
+          let need = q;
+          while (need > 1e-9 && lots.length) {
+            const lot = lots[0];
+            const take = Math.min(need, lot.q);
+            lot.q -= take; need -= take;
+            if (lot.q <= 1e-9) lots.shift();
+          }
+        } else {
+          lots.length = 0;              // 金额口径赎回：视同全部赎回
+        }
+      } else if (act === 'bonus') {
+        if (q > 0) {
+          if (lots.length) lots[lots.length - 1].q += q;
+          else lots.push({ q, date: e.date });
+        }
+      } else if (act === 'split') {
+        lots.forEach(l => { l.q *= (e.ratio || 1); });
+      }
+    });
+    return lots.filter(l => l.q > 1e-9);
+  }
+
   function taxEstimate(S, rules, opts) {
-    const R = Object.assign({}, TAX_DEFAULT, rules || {});
+    const R = Object.assign({}, TAX_DEFAULT, rules || {}, {
+      cnDiv: Object.assign({}, TAX_DEFAULT.cnDiv, (rules || {}).cnDiv || {}),
+    });
     const accountId = opts && opts.accountId;
+    const asOf = asOfOf(opts);
     const dividends = [];
     (S.assets || []).filter(a => a.type === 'stock' && (!accountId || a.accountId === accountId)).forEach(a => {
       const isUS = a.market === 'US';
-      const buys = eventsOf(S, a.id).filter(e => { const x = actionOf(e); return x === 'buy' || x === 'opening'; });
-      eventsOf(S, a.id).filter(e => actionOf(e) === 'div').forEach(e => {
+      eventsOf(S, a.id, asOf).filter(e => actionOf(e) === 'div').forEach(e => {
         const amtCNY = (e.amount || 0) * (e.fx || 1);
-        let rate;
-        if (isUS) rate = R.usDiv;
-        else {
-          const prior = buys.filter(b => b.date <= e.date);
-          const firstBuy = prior[0] ? prior[0].date : null;
-          const days = firstBuy ? (new Date(e.date) - new Date(firstBuy)) / 86400000 : 9999;
-          rate = days <= 30 ? R.cnDiv.le1m : days <= 365 ? R.cnDiv.m1to1y : R.cnDiv.gt1y;
+        let rate, tax;
+        if (isUS) {
+          rate = R.usDiv; tax = amtCNY * rate;
+        } else {
+          const lots = lotsAt(a, S, e.date);
+          const totalQty = lots.reduce((s, l) => s + l.q, 0);
+          if (totalQty > 0) {
+            /* 按各批次份额占比分摊分红，再按批次买入日定档 —— 这是对
+               “先进先出”规则的逐批次近似，比“统一按最早买入日”更接近实际。 */
+            tax = 0;
+            lots.forEach(l => {
+              const days = (new Date(e.date) - new Date(l.date)) / 86400000;
+              const r = days <= 30 ? R.cnDiv.le1m : days <= 365 ? R.cnDiv.m1to1y : R.cnDiv.gt1y;
+              tax += amtCNY * (l.q / totalQty) * r;
+            });
+            rate = amtCNY > 0 ? tax / amtCNY : 0;
+          } else {
+            /* 兜底：无批次信息（历史脏数据）→ 按最早买入日 */
+            const buys = eventsOf(S, a.id, e.date).filter(x => {
+              const k = actionOf(x); return k === 'buy' || k === 'opening';
+            });
+            const firstBuy = buys[0] ? buys[0].date : null;
+            const days = firstBuy ? (new Date(e.date) - new Date(firstBuy)) / 86400000 : 9999;
+            rate = days <= 30 ? R.cnDiv.le1m : days <= 365 ? R.cnDiv.m1to1y : R.cnDiv.gt1y;
+            tax = amtCNY * rate;
+          }
         }
         dividends.push({ asset: a.name, market: isUS ? 'US' : 'CN', date: e.date, amount: round2(amtCNY),
-          rate, tax: round2(amtCNY * rate), net: round2(amtCNY * (1 - rate)) });
+          rate, tax: round2(tax), net: round2(amtCNY - tax) });
       });
     });
     const gains = realizedGainsByYear(S, opts);
@@ -850,13 +1023,23 @@
   }
 
   /* ---------- 定投计划：按期生成投入事件 ---------- */
-  function dcaGenerate(plan) {
+  /**
+   * @param {object} plan  {startMonth, months, day, amount, note}
+   * @param {object} [opts] {until: 'YYYY-MM-DD'} 只生成不晚于该日期的期次（默认不限制）
+   */
+  function dcaGenerate(plan, opts) {
     const out = [];
+    const until = opts && opts.until;
     const [y0, m0] = String(plan.startMonth || '2026-01').split('-').map(Number);
     for (let i = 0; i < (plan.months || 12); i++) {
       const m = (m0 - 1) + i;
       const y = y0 + Math.floor(m / 12), mm = (m % 12) + 1;
-      out.push({ date: `${y}-${String(mm).padStart(2, '0')}-${String(plan.day || 1).padStart(2, '0')}`,
+      /* 扣款日不得超过当月最后一天（1~28 由接口校验，历史数据可能更大） */
+      const lastDay = new Date(y, mm, 0).getDate();
+      const day = Math.min(Math.max(1, plan.day || 1), lastDay);
+      const date = `${y}-${String(mm).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      if (until && date > until) break;
+      out.push({ date,
         kind: 'invest', side: null, qty: plan.qty || null, price: plan.price || null,
         amount: plan.amount, fee: 0, fx: plan.fx || 1, note: plan.note || '定投' });
     }
@@ -868,11 +1051,17 @@
     const out = [];
     (S.assets || []).forEach(a => {
       const al = a.alerts; if (!al) return;
-      const r = calcAsset(a, S), price = unitPriceOf(a, r.qty);
+      const r = calcAsset(a, S, opts);
+      /* 已清仓不再预警：否则会用过期单价/市值触发假信号 */
+      if (!(r.qty > 0)) return;
+      const price = unitPriceOf(a, r.qty, true);
+      /* 收益率阈值用「当前持仓浮盈率」= 浮动 / 剩余成本；
+         不能用「累计收益 / 证券净投入」——本金收回后分母趋近 0，阈值会失真。 */
+      const posRate = r.costCNY > 0 ? r.unrealCNY / r.costCNY : null;
       if (al.takeProfitPrice && price >= al.takeProfitPrice) out.push({ asset: a.name, level: '止盈', msg: `现价 ${price} 达到止盈线 ${al.takeProfitPrice}` });
       if (al.stopLossPrice && price <= al.stopLossPrice) out.push({ asset: a.name, level: '止损', msg: `现价 ${price} 跌破止损线 ${al.stopLossPrice}` });
-      if (al.takeProfitRate && r.rate >= al.takeProfitRate) out.push({ asset: a.name, level: '止盈', msg: `收益率 ${(r.rate * 100).toFixed(1)}% 达 ${(al.takeProfitRate * 100)}%` });
-      if (al.stopLossRate && r.rate <= -al.stopLossRate) out.push({ asset: a.name, level: '止损', msg: `亏损 ${(r.rate * 100).toFixed(1)}% 触 ${(-al.stopLossRate * 100)}%` });
+      if (al.takeProfitRate && posRate != null && posRate >= al.takeProfitRate) out.push({ asset: a.name, level: '止盈', msg: `持仓浮盈 ${(posRate * 100).toFixed(1)}% 达 ${(al.takeProfitRate * 100)}%` });
+      if (al.stopLossRate && posRate != null && posRate <= -al.stopLossRate) out.push({ asset: a.name, level: '止损', msg: `持仓浮亏 ${(posRate * 100).toFixed(1)}% 触 ${(-al.stopLossRate * 100)}%` });
     });
     return out;
   }

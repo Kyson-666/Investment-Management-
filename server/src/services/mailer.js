@@ -12,12 +12,14 @@ const MAIL_CONFIG_KEY = 'smtp';
 
 function getMailConfig() {
   const saved = getConfig(MAIL_CONFIG_KEY, null) || {};
+  /* 显式清空（saved.pass === ''）不应回退环境变量；只有“从未配置过”才回退 */
+  const hasSavedPass = Object.prototype.hasOwnProperty.call(saved, 'pass');
   return {
     host: saved.host ?? config.SMTP.host,
     port: saved.port ?? config.SMTP.port,
     secure: saved.secure ?? config.SMTP.secure,
     user: saved.user ?? config.SMTP.user,
-    pass: saved.pass ? decrypt(saved.pass) : config.SMTP.pass,
+    pass: hasSavedPass ? decrypt(saved.pass) : config.SMTP.pass,
     from: saved.from ?? config.SMTP.from,
   };
 }

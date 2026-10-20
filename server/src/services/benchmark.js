@@ -14,6 +14,7 @@
  */
 
 const { getDb, now } = require('../db');
+const { localDate } = require('../time');
 
 /** 内置支持的基准指数（A 股为主；如需港股/美股需另接数据源） */
 const INDICES = {
@@ -94,7 +95,7 @@ async function fetchMonthEnds(code, opts = {}) {
   const idx = INDICES[code];
   if (!idx) return { ok: false, error: `不支持的基准代码：${code}` };
   const datalen = Math.min(Math.max(+opts.datalen || 400, 60), 1200);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDate();
   const url = `${URL_BASE}?symbol=${idx.symbol}&scale=240&ma=no&datalen=${datalen}`;
   let lastErr = '';
   for (let i = 1; i <= 3; i++) {

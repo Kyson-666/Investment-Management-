@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <h2>资产配置</h2>
-        <div class="sub">大类资产 / 市场 / 账户三维暴露分析，设定目标比例并计算再平衡建议；偏离度 = Σ|当前−目标|/2</div>
+        <div class="sub">证券持仓的大类 / 市场 / 账户暴露分析（不含账户现金）；设定目标比例并计算再平衡建议；偏离度 = Σ|当前−目标|/2</div>
       </div>
       <div class="actions">
         <el-button type="primary" :loading="saving" @click="save">保存目标比例</el-button>
@@ -11,7 +11,7 @@
     </div>
 
     <div class="kpi-row" style="grid-template-columns:repeat(4,1fr)">
-      <div class="kpi"><div class="label">持仓市值 (CNY)</div><div class="val num">¥{{ money(alloc.total) }}</div></div>
+      <div class="kpi"><div class="label">持仓市值 (CNY)</div><div class="val num">¥{{ money(alloc.total) }}</div><div class="sub">账户现金 ¥{{ money(alloc.cashCurrent != null ? alloc.cashCurrent : alloc.cash) }}（不参与目标比例）</div></div>
       <div class="kpi"><div class="label">单边需调整金额</div><div class="val num" :class="driftLevel.cls">¥{{ money(alloc.drift) }}</div><div class="sub">Σ|当前−目标|/2</div></div>
       <div class="kpi"><div class="label">偏离度</div><div class="val num" :class="driftLevel.cls">{{ pct(alloc.driftPct) }}</div></div>
       <div class="kpi"><div class="label">再平衡建议</div>
@@ -128,8 +128,8 @@ const marketRows = computed(() => {
     else cn += h.mvCNY || 0;
   }
   return [
-    { key: 'CN', label: '境内（A股/理财/债券）', ccy: 'CNY', mv: cn, color: '#e0463e' },
-    { key: 'US', label: '境外（美股/美元基金）', ccy: 'USD', mv: us, color: '#2b6cb0' },
+    { key: 'CN', label: '境内（CNY 计价）', ccy: 'CNY', mv: cn, color: '#e0463e' },
+    { key: 'US', label: '境外（USD 计价）', ccy: 'USD', mv: us, color: '#2b6cb0' },
   ];
 });
 

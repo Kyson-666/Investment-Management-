@@ -62,7 +62,7 @@ import { ElMessage } from 'element-plus';
 import { useAuthStore } from '../stores/auth';
 import { usePortfolioStore } from '../stores/portfolio';
 import { fxApi } from '../api';
-import { FX_SOURCE_LABEL } from '../utils/format';
+import { FX_SOURCE_LABEL, todayStr } from '../utils/format';
 import OpsDialogs from '../components/OpsDialogs.vue';
 import { useRemoveConfirm } from '../composables/useRemoveConfirm';
 
@@ -83,7 +83,7 @@ const apiCurrent = ref(null);
 const localCurrent = computed(() => {
   const list = [...fxList.value].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1
     : (a.source === 'manual' ? 1 : 0) - (b.source === 'manual' ? 1 : 0)));
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayStr();
   return list.find(f => f.date <= today) || { rate: 7.1, source: 'fallback', date: '' };
 });
 const current = computed(() => apiCurrent.value || localCurrent.value);

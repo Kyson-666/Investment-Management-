@@ -7,9 +7,10 @@
  */
 const { getDb, now } = require('../db');
 const { config } = require('../config');
+const { localDate } = require('../time');
 
 function todayStr(d = new Date()) {
-  return d.toISOString().slice(0, 10);
+  return localDate(d);
 }
 
 /** 从主源 Frankfurter（ECB）解析 USD→CNY */

@@ -19,6 +19,8 @@
  *   无需解码中文名称（名称一律用本地资产名，避免编码坑）。
  */
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)';
+const prices = require('./prices');
+const { localDate } = require('../time');
 
 /* ---------- 传输 ---------- */
 async function httpGetText(url, headers = {}) {
@@ -136,6 +138,8 @@ async function syncUserQuotes(db, userId, { force = false, kinds, fetchText = ht
     if (sameValue && sameDate && !force) { result.unchanged++; return; }
     const isStock = row.type === 'stock';
     upd.run(isStock ? value : row.price, isStock ? row.unit_price : value, 'auto', date || null, row.id);
+    /* 记录净值/价格历史：定投补投与历史估值按发生日取数 */
+    prices.recordPrice(db, row.id, date || localDate(), value, 'auto');
     result.updated.push({ id: String(row.id), name: row.name, code: row.code, field,
       from: cur, to: value, date: date || '' });
   };
@@ -144,8 +148,13 @@ async function syncUserQuotes(db, userId, { force = false, kinds, fetchText = ht
   const stocks = rows.filter(a => a.type === 'stock');
   if (stocks.length) {
     const keys = new Map(stocks.map(a => [a.id, stockKeys(a)]).filter(([, k]) => k));
-    const tencentQ = stocks.map(a => keys.get(a.id).tencent).join(',');
-    const sinaQ = stocks.map(a => keys.get(a.id).sina).join(',');
+    /* 代码无法识别的资产单独报错，不能因为一个非法代码让整批同步抛异常 */
+    const validStocks = stocks.filter(a => keys.get(a.id));
+    stocks.filter(a => !keys.get(a.id)).forEach(a => {
+      result.errors.push(err(a, '代码无法识别市场（仅支持 6/9/0/3/4/8 开头A股与美股代码）'));
+    });
+    if (validStocks.length) {
+    const tencentQ = validStocks.map(a => keys.get(a.id).tencent).join(',');
     let quotes = new Map();
     let primaryOk = false;
     try {
@@ -153,11 +162,9 @@ async function syncUserQuotes(db, userId, { force = false, kinds, fetchText = ht
       primaryOk = true;
     } catch { /* 主源失败，整批走备源 */ }
 
-    const missing = stocks.filter(a => {
+    const missing = validStocks.filter(a => {
       const k = keys.get(a.id);
-      if (!k) return true;
-      const hit = quotes.get(extractCode(k.tencent, k.sina));
-      return !hit;
+      return !quotes.get(extractCode(k.tencent, k.sina));
     });
     if (missing.length) {
       try {
@@ -178,12 +185,12 @@ async function syncUserQuotes(db, userId, { force = false, kinds, fetchText = ht
       result.source.stocks = 'tencent';
     }
 
-    for (const a of stocks) {
+    for (const a of validStocks) {
       const k = keys.get(a.id);
-      if (!k) { result.errors.push(err(a, '代码无法识别市场（仅支持 6/9/0/3/4/8 开头A股与美股代码）')); continue; }
       const hit = quotes.get(extractCode(k.tencent, k.sina));
       if (!hit) { result.errors.push(err(a, primaryOk ? '接口未返回该代码的报价' : '主备源均未获取到报价')); continue; }
       apply(a, hit.price, hit.date, 'price');
+    }
     }
   }
 

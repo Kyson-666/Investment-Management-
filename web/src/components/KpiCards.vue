@@ -4,38 +4,43 @@
       <div class="label">持仓市值 (CNY)</div>
       <div class="val num">¥{{ money(k.mv) }}</div>
       <div class="sub num muted" v-if="k.marginTotal > 0">融资 {{ money(k.marginTotal) }}</div>
+      <div class="sub num muted" v-if="k.cashCurrent != null">
+        现金 {{ money(k.cashCurrent) }}
+        <template v-if="Math.abs(k.cashFxGain || 0) >= 0.01"> · 汇兑 {{ signedMoney(k.cashFxGain) }}</template>
+      </div>
       <div class="sub num muted" v-else>—</div>
     </div>
     <div class="kpi" :class="{ flash: flashing }">
       <div class="label">累计投入 (CNY)</div>
       <div class="val num">¥{{ money(k.invest) }}</div>
-      <div class="sub num muted">净入金（入金 − 出金）</div>
+      <div class="sub num muted">净入金 + 期初建仓</div>
     </div>
     <div class="kpi" :class="{ flash: flashing }">
       <div class="label">累计收益 (CNY)</div>
       <div class="val num" :class="signClass(k.profit)">{{ signedMoney(k.profit) }}</div>
       <div class="sub num" :class="signClass(k.rate)">
         收益率 {{ signedPct(k.rate) }} ｜ 已实现 {{ signedMoney(k.real) }} · 浮动 {{ signedMoney(k.unreal) }}
+        <template v-if="Math.abs(k.cashAdjust || 0) >= 0.01"> · 现金校准 {{ signedMoney(k.cashAdjust) }}</template>
       </div>
     </div>
     <div class="kpi" :class="{ flash: flashing }">
       <div class="label">XIRR 年化</div>
       <div class="val num" :class="signClass(k.xirr)">{{ k.xirr == null ? '—' : signedPct(k.xirr) }}</div>
-      <div class="sub">按出入金现金流 ｜ 持有 {{ k.holdingDays || 0 }} 天</div>
+      <div class="sub">按出入金 + 期初建仓现金流 ｜ 持有 {{ k.holdingDays || 0 }} 天</div>
     </div>
     <div class="kpi" :class="{ flash: flashing }">
       <div class="label">TWR 时间加权</div>
       <div class="val num" :class="signClass(k.twr)" :title="k.twr == null ? '需要至少 2 个月的月末快照才能计算（数据页可补录；每月最后一天会自动记录）' : ''">
         {{ k.twr == null ? '—' : signedPct(k.twr) }}
       </div>
-      <div class="sub">{{ k.twr == null ? '需 ≥2 个月末快照' : '剔除资金进出影响' }}</div>
+      <div class="sub">{{ k.twr == null ? '需 ≥2 个月末快照' : '证券子组合，剔除资金进出影响' }}</div>
     </div>
     <div class="kpi" :class="{ flash: flashing }">
       <div class="label">基准 α ({{ k.benchmarkCode || 'CSI300' }})</div>
       <div class="val num" :class="signClass(k.alpha)" :title="k.alpha == null ? '需要「≥2 个月末快照」+「≥2 条基准点位」才能计算（数据页可补录快照、一键同步基准点位）' : ''">
         {{ k.alpha == null ? '—' : signedPct(k.alpha) }}
       </div>
-      <div class="sub">{{ k.alpha == null ? '需快照 + 基准点位' : '组合 TWR − 基准涨跌' }}</div>
+      <div class="sub">{{ k.alpha == null ? '需快照 + 基准点位' : '证券子组合 TWR − 基准涨跌' }}</div>
     </div>
     <div class="kpi" :class="{ flash: flashing }">
       <div class="label">本年收益 ({{ yearLabel }})</div>
@@ -77,7 +82,7 @@ const yearBaseTitle = computed(() => {
   const y = new Date().getFullYear();
   if (v.yearRate == null) return '本年收益或投入本金不足，暂不计算年收益率';
   if (v.yearBaseSource === 'prev-year-end') {
-    return `年收益率 = 本年收益 ÷ 年投入本金；本金取 ${y - 1}/12/31 的持仓市值剔除融资后的净资产（¥${v.yearBaseInvest}）`;
+    return `年收益率 = 本年收益 ÷ 年投入本金；本金取 ${y - 1}/12/31 的证券净资产（持仓市值 − 融资，¥${v.yearBaseInvest}）`;
   }
   return `年收益率 = 本年收益 ÷ 年投入本金；因缺少 ${y - 1}/12/31 的月末快照，本金退化为本年净入金（¥${v.yearBaseInvest}）`;
 });

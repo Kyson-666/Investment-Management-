@@ -3,6 +3,8 @@
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
+const audit = require('./services/audit');
+const { getDb } = require('./db');
 
 const authRoutes = require('./routes/auth');
 const accountRoutes = require('./routes/accounts');
@@ -18,6 +20,7 @@ const computeRoutes = require('./routes/compute');
 const dataRoutes = require('./routes/data');
 const adminRoutes = require('./routes/admin');
 const notificationRoutes = require('./routes/notifications');
+const archiveRoutes = require('./routes/archive');
 
 function resolveStaticDir() {
   if (process.env.STATIC_DIR && fs.existsSync(process.env.STATIC_DIR)) return process.env.STATIC_DIR;
@@ -30,8 +33,34 @@ function resolveStaticDir() {
 
 function createApp() {
   const app = express();
+  app.disable('x-powered-by');
+  /* 基础安全响应头（不引入额外依赖） */
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
+  });
   app.use(express.json({ limit: '20mb' }));
   app.set('trust proxy', 1);
+
+  /* 写操作审计：非 GET、成功、已登录。before/after 明细不落库，避免敏感信息扩散。 */
+  app.use((req, res, next) => {
+    res.on('finish', () => {
+      if (req.method === 'GET' || !req.user || res.statusCode >= 400) return;
+      try {
+        const { entity, entityId } = audit.parsePath(req.originalUrl);
+        let action = audit.actionOf(req.method);
+        if (req.originalUrl.startsWith('/api/import')) action = 'import';
+        else if (req.originalUrl.startsWith('/api/demo')) action = 'demo';
+        audit.log(getDb(), {
+          userId: req.user.id, action, entity, entityId,
+          path: req.originalUrl, status: res.statusCode, ip: req.ip,
+        });
+      } catch { /* 审计失败不影响业务响应 */ }
+    });
+    next();
+  });
 
   // 健康检查
   app.get('/api/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
@@ -48,6 +77,7 @@ function createApp() {
   app.use('/api/cashflows', cashFlowRoutes);
   app.use('/api/dca-plans', dcaRoutes);
   app.use('/api/notifications', notificationRoutes);
+  app.use('/api/archive', archiveRoutes);
   app.use('/api/admin', adminRoutes);
   app.use('/api', computeRoutes);   // /api/state /api/compute /api/performance ...
   app.use('/api', dataRoutes);      // /api/export /api/import /api/demo

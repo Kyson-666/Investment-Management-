@@ -11,12 +11,14 @@ const { config } = require('../config');
 function ts() {
   const d = new Date();
   const p = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`;
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
 function writeJsonBackup(payload, prefix = 'auto') {
   fs.mkdirSync(config.BACKUP_DIR, { recursive: true });
-  const file = path.join(config.BACKUP_DIR, `${prefix}_${ts()}.json`);
+  /* 秒级 + 随机后缀：同一分钟内连续导入/示例不会被覆盖 */
+  const file = path.join(config.BACKUP_DIR,
+    `${prefix}_${ts()}_${Math.random().toString(36).slice(2, 6)}.json`);
   fs.writeFileSync(file, JSON.stringify(payload, null, 2), 'utf8');
   return file;
 }
@@ -40,6 +42,8 @@ function pruneOldBackups() {
   const keep = config.BACKUP_KEEP_DAYS;
   const cutoff = Date.now() - keep * 86400000;
   for (const f of fs.readdirSync(config.BACKUP_DIR)) {
+    /* 只清理本服务生成的备份，避免误删用户放在同目录的其他文件 */
+    if (!/^(auto|pre-import|pre-demo|db)_/.test(f)) continue;
     const full = path.join(config.BACKUP_DIR, f);
     try {
       if (fs.statSync(full).mtimeMs < cutoff) fs.rmSync(full, { force: true });

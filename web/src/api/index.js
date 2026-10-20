@@ -84,8 +84,14 @@ export const fxApi = {
   sync: () => api.post('/api/fx/sync'),
   remove: (id) => api.del(`/api/fx/${id}`),
 };
+export const archiveApi = {
+  list: () => api.get('/api/archive'),
+  restore: (id) => api.post(`/api/archive/${id}/restore`),
+  purge: (id) => api.del(`/api/archive/${id}`),
+};
 export const snapshotsApi = {
   save: (b) => api.post('/api/snapshots', b),
+  derive: (month) => api.get(`/api/snapshots/derive?month=${encodeURIComponent(month)}`),
   remove: (month) => api.del(`/api/snapshots/${month}`),
 };
 export const benchmarksApi = {

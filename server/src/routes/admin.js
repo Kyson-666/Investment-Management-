@@ -8,6 +8,7 @@ const { authRequired, adminRequired } = require('../middleware/auth');
 const { asyncHandler, badRequest, notFound } = require('../middleware/helpers');
 const { encrypt, decrypt, maskSecret } = require('../crypto');
 const mailer = require('../services/mailer');
+const audit = require('../services/audit');
 
 const router = express.Router();
 router.use(authRequired, adminRequired);
@@ -40,7 +41,7 @@ router.post('/users/:id/reset-password', (req, res) => {
   if (!target) return notFound(res, '用户不存在');
   const temp = crypto.randomBytes(6).toString('base64url').slice(0, 10) + 'A1';
   const hash = bcrypt.hashSync(temp, 10);
-  getDb().prepare('UPDATE user SET password_hash=? WHERE id=?').run(hash, target.id);
+  getDb().prepare('UPDATE user SET password_hash=?, token_version=token_version+1 WHERE id=?').run(hash, target.id);
   res.json({ ok: true, tempPassword: temp });
 });
 
@@ -92,6 +93,11 @@ router.get('/stats', (req, res) => {
     latestFx: db.prepare('SELECT * FROM fx_rate ORDER BY date DESC, id DESC LIMIT 1').get(),
     mailConfigured: mailer.isConfigured(),
   });
+});
+
+/* 最近写操作（谁在何时改了哪个实体） */
+router.get('/audit', (req, res) => {
+  res.json(audit.list(getDb(), req.query.limit));
 });
 
 module.exports = router;

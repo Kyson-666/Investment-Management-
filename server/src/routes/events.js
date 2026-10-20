@@ -5,6 +5,8 @@ const { getDb, now } = require('../db');
 const { authRequired } = require('../middleware/auth');
 const { asyncHandler, badRequest, notFound, ownedRow } = require('../middleware/helpers');
 const { currentFx } = require('../services/fx');
+const { checkSellable } = require('../services/position');
+const archive = require('../services/archive');
 
 const router = express.Router();
 router.use(authRequired);
@@ -132,6 +134,10 @@ router.post('/', asyncHandler(async (req, res) => {
   if (!asset) return badRequest(res, '资产不存在或无权操作');
   const { value, error } = normalize(req.body || {}, asset);
   if (error) return badRequest(res, error);
+  /* 卖出/赎回不得超过该资产截至事件日的可用份额（编辑时排除自身） */
+  const act = value.side || value.kind;
+  const posErr = checkSellable(getDb(), req.user.id, asset, value.date, act, value.qty, null);
+  if (posErr) return badRequest(res, posErr);
   /* 融资仅限券商账户 */
   if (value.marginCNY > 0) {
     const acc = getDb().prepare('SELECT kind FROM account WHERE id=? AND user_id=?')
@@ -156,10 +162,15 @@ router.put('/:id', asyncHandler(async (req, res) => {
   const merged = {
     date: req.body.date ?? row.date, kind: row.kind, side: row.side,
     qty: row.qty, price: row.price, amount: row.amount, ratio: row.ratio,
-    fee: row.fee, fx: row.fx, isT: row.is_t, note: row.note, ...req.body,
+    fee: row.fee, fx: row.fx, isT: row.is_t, note: row.note,
+    marginCNY: row.margin_cny,   // ★ 缺省=保留；显式 0 才清空（否则任何编辑都会丢融资）
+    ...req.body,
   };
   const { value, error } = normalize(merged, asset);
   if (error) return badRequest(res, error);
+  const act = value.side || value.kind;
+  const posErr = checkSellable(db, req.user.id, asset, value.date, act, value.qty, row.id);
+  if (posErr) return badRequest(res, posErr);
   db.prepare(`UPDATE event SET date=?,kind=?,side=?,qty=?,price=?,amount=?,ratio=?,fee=?,margin_cny=?,fx=?,is_t=?,note=?
               WHERE id=? AND user_id=?`).run(
     value.date, value.kind, value.side, value.qty ?? null, value.price ?? null,
@@ -172,8 +183,14 @@ router.put('/:id', asyncHandler(async (req, res) => {
 router.delete('/:id', (req, res) => {
   const row = ownedRow(getDb(), 'event', req.params.id, req.user.id);
   if (!row) return notFound(res);
-  getDb().prepare('DELETE FROM event WHERE id=? AND user_id=?').run(row.id, req.user.id);
-  res.json({ ok: true });
+  const db = getDb();
+  let archivedId = null;
+  db.transaction(() => {
+    const ar = archive.archiveEvent(db, req.user.id, row.id);
+    archivedId = ar ? String(ar.id) : null;
+    db.prepare('DELETE FROM event WHERE id=? AND user_id=?').run(row.id, req.user.id);
+  })();
+  res.json({ ok: true, archivedId });
 });
 
 module.exports = router;

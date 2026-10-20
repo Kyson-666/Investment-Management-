@@ -21,7 +21,13 @@
     </div>
     <div class="ac-row" v-if="hasOpening"><span>期初建仓</span><b class="num">{{ money(h.calc.openingQty, 4) }} 份 / ¥{{ money(h.calc.openingCostCNY) }}</b></div>
     <div class="ac-row"><span>成本 (CNY)</span><b class="num">¥{{ money(h.calc.costCNY) }}</b></div>
-    <div class="ac-row"><span>已实现</span><b class="num" :class="signClass(h.calc.realCNY)">{{ signedMoney(h.calc.realCNY) }}</b></div>
+    <div class="ac-row"><span>已实现（含分红/利息）</span><b class="num" :class="signClass(h.calc.realTotalCNY)">{{ signedMoney(h.calc.realTotalCNY) }}</b></div>
+    <div class="ac-row ac-sub" v-if="(h.calc.divCNY || 0) + (h.calc.incomeCNY || 0) > 0">
+      <span>├ 其中分红 / 利息</span>
+      <b class="num" :class="signClass((h.calc.divCNY || 0) + (h.calc.incomeCNY || 0))">
+        {{ signedMoney((h.calc.divCNY || 0) + (h.calc.incomeCNY || 0)) }}
+      </b>
+    </div>
     <div class="ac-row"><span>浮动盈亏</span><b class="num" :class="signClass(h.calc.unrealCNY)">{{ signedMoney(h.calc.unrealCNY) }}</b></div>
     <div class="ac-row ac-sub" v-if="h.calc.qty > 0">
       <span>├ 股价损益 <i class="ac-hint">仅价格变动</i></span>
