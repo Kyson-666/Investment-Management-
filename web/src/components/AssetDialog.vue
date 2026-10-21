@@ -133,6 +133,29 @@
           </el-form-item>
         </template>
       </template>
+
+      <!-- 编辑态：期初建仓维护（v1.0.9）——期初建仓创建后需要能改/清除/转为买入 -->
+      <template v-if="isEdit">
+        <el-divider content-position="left"><span class="form-tip">期初建仓</span></el-divider>
+        <div class="form-tip" style="margin:-6px 0 10px 4px;line-height:1.65">
+          「期初建仓」按设计<b>不产生现金流</b>（视为记账开始前已持有）。
+          若这笔持仓其实是记账期内用<b>入金</b>买入的，请转为<b>买入/申购</b>事件 ——
+          否则入金会一直挂在账户现金上，与持仓重复，造成净资产虚增。
+        </div>
+        <el-form-item label="当前">
+          <span v-if="hasOpening">
+            {{ fmtQty(openingInfo.qty) }} 份 ｜ 成本 ¥{{ money(openingInfo.cost) }}
+            <template v-if="openingInfo.margin > 0"> ｜ 期初融资 ¥{{ money(openingInfo.margin) }}</template>
+          </span>
+          <span v-else class="muted">未设置期初建仓</span>
+        </el-form-item>
+        <el-form-item v-if="hasOpening" label="操作">
+          <div class="opening-actions">
+            <el-button type="warning" plain :loading="opsBusy" @click="convertToBuy">转为买入/申购</el-button>
+            <el-button type="danger" plain :loading="opsBusy" @click="clearOpening">清除期初建仓</el-button>
+          </div>
+        </el-form-item>
+      </template>
     </el-form>
     <template #footer>
       <el-button @click="$emit('update:modelValue', false)">取消</el-button>
@@ -143,9 +166,9 @@
 
 <script setup>
 import { reactive, ref, watch, computed } from 'vue';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { assetsApi, fxApi } from '../api';
-import { ACCOUNT_KIND_LABEL, todayStr } from '../utils/format';
+import { ACCOUNT_KIND_LABEL, todayStr, money } from '../utils/format';
 import { ccyName } from '../utils/format';
 import { usePortfolioStore } from '../stores/portfolio';
 
@@ -167,6 +190,75 @@ const saving = ref(false);
 const form = reactive({});
 
 const store = usePortfolioStore();
+
+/* ---------- 编辑态：期初建仓维护（v1.0.9） ---------- */
+/** 当前资产的期初建仓（份额 / 成本 / 期初融资），数据来自 store 的 calc 结果 */
+const openingInfo = computed(() => {
+  const h = store.holdings.find(x => x.asset.id === (props.asset && props.asset.id));
+  const c = (h && h.calc) || {};
+  return {
+    qty: +(c.openingQty || 0),
+    cost: +(c.openingCostCNY || 0),
+    margin: +((props.asset && props.asset.marginCNY) || 0),
+  };
+});
+const hasOpening = computed(() => openingInfo.value.qty > 0);
+const opsBusy = ref(false);
+const fmtQty = v => (+v || 0).toLocaleString('zh-CN', { maximumFractionDigits: 4 });
+
+/** 期初建仓 → 买入/申购事件：份额与持仓成本不变，现金按「成交额 − 融资」扣减 */
+async function convertToBuy() {
+  const { qty, cost, margin } = openingInfo.value;
+  const selfPay = Math.max(0, +(cost - margin).toFixed(2));
+  const label = props.asset && props.asset.type === 'stock' ? '买入' : '申购';
+  try {
+    await ElMessageBox.confirm(
+      `将把 ${fmtQty(qty)} 份 / 成本 ¥${money(cost)} 的期初建仓转为「${label}」事件。\n\n`
+      + `持仓份额与成本不变；账户现金将扣减 ¥${money(selfPay)}（= 成交额 − 期初融资 ¥${money(margin)}）。\n`
+      + '若现金因此变为负数，说明还有本金未录入金，请到「出入金」页补录。',
+      `确认转为${label}？`,
+      { type: 'warning', confirmButtonText: `转为${label}`, cancelButtonText: '取消' },
+    );
+  } catch { return; }
+  opsBusy.value = true;
+  try {
+    const r = await assetsApi.convertOpening(props.asset.id);
+    await store.refreshAll();
+    ElMessage.success(`已转为${r.kind === 'buy' ? '买入' : '申购'}事件，现金扣减 ¥${money(r.selfPayCNY)}`);
+    emit('saved');
+  } catch (e) {
+    ElMessage.error(e.message || '转换失败');
+  } finally {
+    opsBusy.value = false;
+  }
+}
+
+/** 清除期初建仓：份额与期初融资一并移除（不可撤销） */
+async function clearOpening() {
+  const { qty, cost, margin } = openingInfo.value;
+  try {
+    await ElMessageBox.confirm(
+      `将删除 ${fmtQty(qty)} 份 / 成本 ¥${money(cost)} 的期初建仓`
+      + (margin > 0 ? `，并清零期初融资 ¥${money(margin)}` : '')
+      + '。\n\n该资产剩余份额与成本只按已录入的买入/卖出流水计算。此操作不可撤销。',
+      '确认清除期初建仓？',
+      { type: 'warning', confirmButtonText: '确认清除', cancelButtonText: '取消' },
+    );
+  } catch { return; }
+  opsBusy.value = true;
+  try {
+    await assetsApi.clearOpening(props.asset.id);
+    await store.refreshAll();
+    ElMessage.success('已清除期初建仓');
+    emit('saved');
+    emit('update:modelValue', false);
+  } catch (e) {
+    ElMessage.error(e.message || '清除失败');
+  } finally {
+    opsBusy.value = false;
+  }
+}
+
 /** 当前份额：新建时用「期初份额」；编辑时取账本中的实际持仓份额 */
 const currentQty = computed(() => {
   if (isEdit.value) {
@@ -376,3 +468,13 @@ async function save() {
 }
 function onClosed() { /* form 保留无影响 */ }
 </script>
+
+<style scoped>
+/* 期初建仓操作按钮：桌面并排、移动端整行（与项目其他操作区一致） */
+.opening-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.opening-actions :deep(.el-button) { margin-left: 0; }
+@media (max-width: 768px) {
+  .opening-actions { flex-direction: column; width: 100%; }
+  .opening-actions :deep(.el-button) { width: 100%; margin-left: 0; }
+}
+</style>

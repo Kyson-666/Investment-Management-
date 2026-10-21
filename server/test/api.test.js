@@ -1024,3 +1024,82 @@ test('P1 回归：计算缓存写后读一致（HTTP 写路径前置失效）+ �
 
   await api('DELETE', `/api/accounts/${acc.json.id}`, token);
 });
+
+/* =========================================================
+ * 期初建仓维护（v1.0.9）：修改 / 转为买入 / 清除
+ * 背景：期初建仓原先创建后不可改、不可删；若持仓实为记账期内用入金买入，
+ *       用期初建仓表达会让入金一直挂在账户现金上（净资产虚增）。
+ * ========================================================= */
+test('期初建仓：修改份额、融资上限校验、转为买入后现金扣减且恒等式自洽', async () => {
+  const acc = await api('POST', '/api/accounts', adminToken, { name: '建仓维护账户', kind: 'broker', currency: 'CNY' });
+  assert.ok([200, 201].includes(acc.status), `创建账户应成功，实得 ${acc.status}`);
+  const asset = await api('POST', '/api/assets', adminToken, {
+    name: '建仓维护股', type: 'stock', market: 'CN', code: '600001',
+    currency: 'CNY', accountId: acc.json.id, price: 12,
+    opening: { qty: 100, costPrice: 10, date: '2025-01-05' },
+  });
+  assert.equal(asset.status, 201);
+  const aid = asset.json.id;
+  await api('POST', '/api/cashflows', adminToken, {
+    accountId: acc.json.id, date: '2025-01-05', kind: 'deposit', amount: 1000,
+  });
+
+  const kpi = async () => (await api('GET', `/api/compute?accountId=${acc.json.id}`, adminToken)).json.kpis;
+  let k = await kpi();
+  assert.equal(k.invest, 1000, '累计投入 = 净入金');
+  assert.equal(k.cash, 1000, '期初建仓不产生现金流，入金仍挂在现金上');
+  assert.equal(k.mv, 1200);
+  assert.ok(Math.abs(k.identityDiff) < 0.01, `恒等式应自洽，实得 ${k.identityDiff}`);
+
+  /* 1) 修改期初建仓：100 → 200 份（成本 2000） */
+  let r = await api('PUT', `/api/assets/${aid}/opening`, adminToken, { qty: 200, costPrice: 10, date: '2025-01-05' });
+  assert.equal(r.status, 200);
+  k = await kpi();
+  assert.equal(k.mv, 2400, '份额翻倍后市值应为 2400');
+
+  /* 2) 期初融资不得超过期初成本 → 400 */
+  r = await api('PUT', `/api/assets/${aid}/opening`, adminToken, { qty: 200, costPrice: 10, margin: 5000 });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error || '', /期初融资不能超过期初建仓成本/);
+
+  /* 3) 转为买入：现金扣 2000（成本 2000 − 融资 0），成本与份额不变，恒等式仍自洽 */
+  r = await api('POST', `/api/assets/${aid}/opening/convert-to-buy`, adminToken);
+  assert.equal(r.status, 200);
+  assert.equal(r.json.selfPayCNY, 2000);
+  assert.equal(r.json.kind, 'buy');
+  k = await kpi();
+  assert.equal(k.cash, -1000, '入金 1000 − 买入自付 2000 = −1000');
+  assert.equal(k.mv, 2400, '份额与成本不变');
+  assert.equal(k.invest, 1000, '展示口径仍是净入金');
+  assert.ok(Math.abs(k.identityDiff) < 0.01, `转换后恒等式仍应自洽，实得 ${k.identityDiff}`);
+
+  /* 4) 已无期初建仓 → 再转/清除均 400 */
+  r = await api('POST', `/api/assets/${aid}/opening/convert-to-buy`, adminToken);
+  assert.equal(r.status, 400);
+  r = await api('DELETE', `/api/assets/${aid}/opening`, adminToken);
+  assert.equal(r.status, 400);
+});
+
+test('期初建仓：清除后份额与期初融资归零', async () => {
+  const acc = await api('POST', '/api/accounts', adminToken, { name: '清除建仓账户', kind: 'broker', currency: 'CNY' });
+  const asset = await api('POST', '/api/assets', adminToken, {
+    name: '清除建仓股', type: 'stock', market: 'CN', code: '600002',
+    currency: 'CNY', accountId: acc.json.id, price: 10,
+    opening: { qty: 100, costPrice: 10, date: '2025-01-05' },
+    margin: 300,
+  });
+  assert.equal(asset.status, 201);
+  const aid = asset.json.id;
+
+  const kpi = async () => (await api('GET', `/api/compute?accountId=${acc.json.id}`, adminToken)).json.kpis;
+  let k = await kpi();
+  assert.equal(k.marginTotal, 300);
+  assert.equal(k.mv, 1000);
+
+  const r = await api('DELETE', `/api/assets/${aid}/opening`, adminToken);
+  assert.equal(r.status, 200);
+  k = await kpi();
+  assert.equal(k.mv, 0, '清除后无持仓');
+  assert.equal(k.marginTotal, 0, '期初融资一并清零，避免有负债无资产');
+  assert.equal(k.openingCost, 0);
+});

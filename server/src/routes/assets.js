@@ -250,4 +250,89 @@ router.delete('/:id', (req, res) => {
   res.json({ ok: true, archivedId });
 });
 
+/* ---------- 期初建仓维护（v1.0.9） ----------
+ * 此前期初建仓只在创建资产时可录，之后在界面上既不能改也不能删。
+ * 现在支持：修改 / 清除 / 转为买入事件。
+ *
+ * 为什么需要「转为买入」：期初建仓按设计**不产生现金流**（假设是记账开始前已持有）。
+ * 若持仓其实是记账期内用「入金」买入的，用期初建仓表达会让入金永远不被消耗、
+ * 现金虚增（同一笔钱既在现金又在持仓）。转成买入事件后现金会被正确扣减。
+ */
+function openingEventOf(db, assetId, userId) {
+  return db.prepare("SELECT * FROM event WHERE asset_id=? AND user_id=? AND kind='opening' ORDER BY date, id LIMIT 1")
+    .get(assetId, userId);
+}
+
+/** 新增或修改期初建仓（份额 / 成本单价或本金 / 日期 / 期初融资） */
+router.put('/:id/opening', asyncHandler(async (req, res) => {
+  const row = ownedRow(getDb(), 'asset', req.params.id, req.user.id);
+  if (!row) return notFound(res);
+  const b = req.body || {};
+  const parsed = parseOpening(b);
+  if (typeof parsed === 'string') return badRequest(res, parsed);
+  if (!parsed) return badRequest(res, '请填写期初份额与成本');
+  const { qty, price, amount, date } = parsed;
+
+  const fx = row.currency === 'CNY' ? 1
+    : (b.fx !== undefined && b.fx !== null && Number(b.fx) > 0 ? Number(b.fx) : currentFx(date));
+  let margin = row.margin_cny || 0;
+  if (b.marginCNY !== undefined || b.margin !== undefined) {
+    const account = ownedRow(getDb(), 'account', row.account_id, req.user.id) || { kind: 'other' };
+    const m = parseMargin(b, account, date);
+    if (typeof m === 'string') return badRequest(res, m);
+    margin = m;
+  }
+  if (margin > amount * fx + 0.01) return badRequest(res, '期初融资不能超过期初建仓成本');
+
+  const db = getDb();
+  db.transaction(() => {
+    const ex = openingEventOf(db, row.id, req.user.id);
+    if (ex) {
+      db.prepare('UPDATE event SET date=?, qty=?, price=?, amount=?, fx=? WHERE id=? AND user_id=?')
+        .run(date, qty, price, amount, fx, ex.id, req.user.id);
+    } else {
+      db.prepare(`INSERT INTO event
+        (user_id,asset_id,date,kind,side,qty,price,amount,ratio,fee,fx,is_t,note,created_at)
+        VALUES (?,?,?,?,NULL,?,?,?,NULL,0,?,0,?,?)`)
+        .run(req.user.id, row.id, date, 'opening', qty, price, amount, fx, '期初建仓（手工补录）', now());
+    }
+    db.prepare('UPDATE asset SET margin_cny=? WHERE id=? AND user_id=?').run(margin, row.id, req.user.id);
+  })();
+  res.json({ ok: true, marginCNY: margin, amount, fx });
+}));
+
+/** 清除期初建仓（期初融资一并清零，避免「有负债无资产」） */
+router.delete('/:id/opening', asyncHandler(async (req, res) => {
+  const row = ownedRow(getDb(), 'asset', req.params.id, req.user.id);
+  if (!row) return notFound(res);
+  const db = getDb();
+  const ex = openingEventOf(db, row.id, req.user.id);
+  if (!ex) return badRequest(res, '该资产没有期初建仓记录');
+  db.transaction(() => {
+    db.prepare('DELETE FROM event WHERE id=? AND user_id=?').run(ex.id, req.user.id);
+    db.prepare('UPDATE asset SET margin_cny=0 WHERE id=? AND user_id=?').run(row.id, req.user.id);
+  })();
+  res.json({ ok: true });
+}));
+
+/** 期初建仓转为买入/申购事件：份额与成本不变，期初融资迁移为该笔买入的融资 */
+router.post('/:id/opening/convert-to-buy', asyncHandler(async (req, res) => {
+  const row = ownedRow(getDb(), 'asset', req.params.id, req.user.id);
+  if (!row) return notFound(res);
+  const db = getDb();
+  const ex = openingEventOf(db, row.id, req.user.id);
+  if (!ex) return badRequest(res, '该资产没有期初建仓记录');
+  const isStock = row.type === 'stock';
+  const margin = row.margin_cny || 0;
+  const fx = ex.fx || 1;
+  const selfPay = Math.max(0, +((ex.amount || 0) * fx - margin).toFixed(2));
+  db.transaction(() => {
+    db.prepare('UPDATE event SET kind=?, side=?, margin_cny=?, note=? WHERE id=? AND user_id=?')
+      .run(isStock ? 'buy' : 'invest', isStock ? 'buy' : null, margin,
+        '由期初建仓转为买入/申购（原不产生现金流，转为买入后将扣减账户现金）', ex.id, req.user.id);
+    db.prepare('UPDATE asset SET margin_cny=0 WHERE id=? AND user_id=?').run(row.id, req.user.id);
+  })();
+  res.json({ ok: true, selfPayCNY: selfPay, marginCNY: margin, kind: isStock ? 'buy' : 'invest' });
+}));
+
 module.exports = router;
