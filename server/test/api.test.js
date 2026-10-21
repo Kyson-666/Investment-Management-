@@ -21,6 +21,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { init, getDb } = require('../src/db');
 const { createApp } = require('../src/app');
+const cache = require('../src/services/cache');
 
 init(TMP_DB);
 const server = createApp().listen(0);
@@ -776,11 +777,13 @@ test('P1 回归：月末快照按事件与历史净值派生，并返回差异',
   });
   assert.equal(ev.status, 201, JSON.stringify(ev.json));
 
-  /* 插入月末历史净值 11：派生应使用 11，而不是当前净值 12 */
+  /* 插入月末历史净值 11：派生应使用 11，而不是当前净值 12
+     （直接写库不经 HTTP 层，需显式失效计算缓存） */
   getDb().prepare(`INSERT INTO asset_price_history (asset_id,date,unit_price,source,created_at)
                    VALUES (?,?,?,?,?)
                    ON CONFLICT(asset_id,date) DO UPDATE SET unit_price=excluded.unit_price`)
     .run(a.json.id, '2026-01-31', 11, 'manual', new Date().toISOString());
+  cache.bumpAll();
 
   const d = await api('GET', '/api/snapshots/derive?month=2026-01', token);
   assert.equal(d.status, 200, JSON.stringify(d.json));
@@ -795,8 +798,10 @@ test('P1 回归：月末快照按事件与历史净值派生，并返回差异',
   assert.equal(save.json.derived.diff, -100);
   assert.ok(Math.abs(save.json.derived.diffPct + 0.090909) < 0.00001);
 
-  /* 删除历史净值后，历史月份只能按当前价估算 → complete=false、diff=null */
+  /* 删除历史净值后，历史月份只能按当前价估算 → complete=false、diff=null
+     （直接写库不经 HTTP 层，需显式失效计算缓存） */
   getDb().prepare('DELETE FROM asset_price_history WHERE asset_id=?').run(a.json.id);
+  cache.bumpAll();
   const d2 = await api('GET', '/api/snapshots/derive?month=2026-01', token);
   assert.equal(d2.status, 200);
   assert.equal(d2.json.complete, false);
@@ -895,4 +900,127 @@ test('P1 回归：删除账户先归档，可恢复账户/资产/流水', async 
   const purge = await api('DELETE', `/api/archive/${del.json.archivedId}`, token);
   assert.equal(purge.status, 200);
   assert.equal((await api('GET', '/api/archive', token)).json.length, 0);
+});
+
+test('P1 回归：快照自动回填缺失月份，不覆盖已有快照，差异报告口径一致', async () => {
+  const uname = `af${Date.now()}`;
+  const reg = await api('POST', '/api/auth/register', null, {
+    username: uname, email: `${uname}@test.com`, password: 'Af123456',
+  });
+  assert.equal(reg.status, 201, JSON.stringify(reg.json));
+  const token = reg.json.token;
+
+  const acc = await api('POST', '/api/accounts', token, { name: '回填账户', kind: 'bank', currency: 'CNY' });
+  const a = await api('POST', '/api/assets', token, {
+    name: '回填基金', type: 'fund', code: '000004', currency: 'CNY',
+    accountId: acc.json.id, unitPrice: 12, marketValue: 0,
+  });
+  const ev = await api('POST', '/api/events', token, {
+    assetId: a.json.id, date: '2026-01-10', kind: 'invest', qty: 100, price: 10, amount: 1000,
+  });
+  assert.equal(ev.status, 201, JSON.stringify(ev.json));
+
+  /* 历史净值：2026-01-31 = 11、2026-02-28 = 12（直接写库后失效缓存） */
+  const insertNav = db => db.prepare(`INSERT INTO asset_price_history (asset_id,date,unit_price,source,created_at)
+    VALUES (?,?,?,?,?) ON CONFLICT(asset_id,date) DO UPDATE SET unit_price=excluded.unit_price`);
+  insertNav(getDb()).run(a.json.id, '2026-01-31', 11, 'manual', new Date().toISOString());
+  insertNav(getDb()).run(a.json.id, '2026-02-28', 12, 'manual', new Date().toISOString());
+  cache.bumpAll();
+
+  /* 首次回填：2026-01（净值 11 → 1100）、2026-02（净值 12 → 1200）。
+     2026-03 起按「发生日最近单价」口径取 02-28 净值 12 → 仍为 history 来源，
+     9 个月（01..09）全部 complete 落入 filled */
+  const r1 = await api('POST', '/api/snapshots/autofill', token, {});
+  assert.equal(r1.status, 200, JSON.stringify(r1.json));
+  assert.equal(r1.json.filled.length, 9, JSON.stringify(r1.json.filled));
+  assert.equal(r1.json.filled[0].month, '2026-01');
+  assert.equal(r1.json.filled[0].total, 1100);
+  assert.equal(r1.json.filled[1].total, 1200);
+  assert.equal(r1.json.incomplete.length, 0);
+  assert.equal(r1.json.skipped.length, 0);
+
+  /* 幂等：再次回填全部跳过，不重复落库 */
+  const r2 = await api('POST', '/api/snapshots/autofill', token, {});
+  assert.equal(r2.status, 200);
+  assert.equal(r2.json.filled.length, 0);
+  assert.equal(r2.json.skipped.length, 9);
+
+  /* 差异报告（历史净值在场）：手填覆盖 2026-01 为 1000 → diff=-100、mismatch=1 */
+  const save = await api('POST', '/api/snapshots', token, { month: '2026-01', total: 1000 });
+  assert.equal(save.status, 201, JSON.stringify(save.json));
+  const report = await api('GET', '/api/snapshots/report', token);
+  assert.equal(report.status, 200, JSON.stringify(report.json));
+  const jan = report.json.rows.find(x => x.month === '2026-01');
+  assert.ok(jan, '报告应包含 2026-01');
+  assert.equal(jan.saved, 1000);
+  assert.equal(jan.savedSource, 'manual');
+  assert.equal(jan.derived, 1100);
+  assert.equal(jan.diff, -100);
+  assert.equal(report.json.summary.mismatch, 1);
+  assert.ok(report.json.summary.saved >= 9);
+  /* 缺失统计：报告范围含当前月（尚未保存） */
+  assert.ok(report.json.summary.missing >= 1);
+
+  /* estimated 路径：删除全部历史净值并清快照后重填 →
+     所有月份只能按当前净值 12 估算 → incomplete（非当前月 source='current'） */
+  getDb().prepare('DELETE FROM asset_price_history WHERE asset_id=?').run(a.json.id);
+  cache.bumpAll();
+  for (const m of r1.json.filled.map(x => x.month)) {
+    await api('DELETE', `/api/snapshots/${m}`, token);
+  }
+  const r3 = await api('POST', '/api/snapshots/autofill', token, {});
+  assert.equal(r3.status, 200, JSON.stringify(r3.json));
+  assert.equal(r3.json.filled.length, 0);
+  assert.equal(r3.json.incomplete.length, 9, JSON.stringify(r3.json.incomplete));
+  assert.ok(r3.json.incomplete.every(x => x.estimatedPrice >= 1));
+
+  await api('DELETE', `/api/accounts/${acc.json.id}`, token);
+});
+
+test('P1 回归：计算缓存写后读一致（HTTP 写路径前置失效）+ 事件分页', async () => {
+  const uname = `cc${Date.now()}`;
+  const reg = await api('POST', '/api/auth/register', null, {
+    username: uname, email: `${uname}@test.com`, password: 'Cc123456',
+  });
+  assert.equal(reg.status, 201, JSON.stringify(reg.json));
+  const token = reg.json.token;
+
+  const acc = await api('POST', '/api/accounts', token, { name: '缓存账户', kind: 'broker', currency: 'CNY' });
+  const a = await api('POST', '/api/assets', token, {
+    name: '缓存股票', type: 'stock', market: 'CN', code: '600005', currency: 'CNY',
+    accountId: acc.json.id, price: 10,
+  });
+
+  /* 建立缓存基线：无事件时 mv=0 */
+  const c0 = await api('GET', '/api/compute', token);
+  assert.equal(c0.status, 200);
+  assert.equal(c0.json.kpis.mv, 0);
+
+  /* 写入事件后立即读取：缓存必须已失效，mv=1000 */
+  const ev1 = await api('POST', '/api/events', token, {
+    assetId: a.json.id, date: '2026-09-01', side: 'buy', qty: 100, price: 10,
+  });
+  assert.equal(ev1.status, 201, JSON.stringify(ev1.json));
+  const c1 = await api('GET', '/api/compute', token);
+  assert.equal(c1.json.kpis.mv, 1000, `写后读应反映新事件：${JSON.stringify(c1.json.kpis)}`);
+
+  /* 再写一笔，再次读：持仓 200 股 × 当前价 10 = 2000（买入事件不改当前价） */
+  const ev2 = await api('POST', '/api/events', token, {
+    assetId: a.json.id, date: '2026-09-10', side: 'buy', qty: 100, price: 20,
+  });
+  assert.equal(ev2.status, 201, JSON.stringify(ev2.json));
+  const c2 = await api('GET', '/api/compute', token);
+  assert.equal(c2.json.kpis.mv, 2000, `第二次写后读：${JSON.stringify(c2.json.kpis)}`);
+
+  /* 事件分页：SQL 下推 limit/offset；缺省全量保持兼容 */
+  const all = await api('GET', '/api/events', token);
+  assert.equal(all.json.length, 2);
+  const page1 = await api('GET', '/api/events?limit=1', token);
+  assert.equal(page1.json.length, 1);
+  assert.equal(page1.json[0].id, ev2.json.id, '按 date DESC 第一页应为最新一笔');
+  const page2 = await api('GET', '/api/events?limit=1&offset=1', token);
+  assert.equal(page2.json.length, 1);
+  assert.equal(page2.json[0].id, ev1.json.id);
+
+  await api('DELETE', `/api/accounts/${acc.json.id}`, token);
 });

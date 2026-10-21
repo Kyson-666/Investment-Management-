@@ -5,6 +5,7 @@
  */
 const { getDb } = require('./db');
 const Calc = require('./calc');
+const cache = require('./services/cache');
 
 const DEFAULT_SETTINGS = {
   costMethod: 'wavg',
@@ -43,8 +44,14 @@ function saveUserSettings(userId, patch) {
   return next;
 }
 
-/** 组装引擎状态对象（账户过滤由引擎 opts.accountId 处理） */
+/** 组装引擎状态对象（账户过滤由引擎 opts.accountId 处理）
+ *  结果按数据版本缓存：同一版本内多次调用（10 个只读端点、多月快照派生）只查一次库。
+ *  调用方只读不修改返回对象（scope/filter/map 均生成新数组）。 */
 function buildState(userId) {
+  const key = `S|${cache.vOf(userId)}|${userId}`;
+  const hit = cache.getCache(key);
+  if (hit) return hit;
+
   const db = getDb();
   const user = getUser(userId);
   const settings = getUserSettings(user);
@@ -113,13 +120,13 @@ function buildState(userId) {
       day: p.day, amount: p.amount, note: p.note || '', active: p.active ? true : false,
     }));
 
-  return {
+  return cache.setCache(key, {
     userId,
     settings: { costMethod: settings.costMethod, dividendReducesCost: settings.dividendReducesCost },
     fullSettings: settings,
     accounts, assets, events, fx, snapshots,
     benchSeries: benchRows, cashFlows, dcaPlans,
-  };
+  });
 }
 
 

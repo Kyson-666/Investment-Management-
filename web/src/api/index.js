@@ -92,6 +92,10 @@ export const archiveApi = {
 export const snapshotsApi = {
   save: (b) => api.post('/api/snapshots', b),
   derive: (month) => api.get(`/api/snapshots/derive?month=${encodeURIComponent(month)}`),
+  /* 差异报告：全月份 saved vs 派生对账（仅派生完整月计算 diff） */
+  report: () => api.get('/api/snapshots/report'),
+  /* 批量回填历史缺失月末快照（不覆盖已有快照） */
+  autofill: (b) => api.post('/api/snapshots/autofill', b || {}),
   remove: (month) => api.del(`/api/snapshots/${month}`),
 };
 export const benchmarksApi = {

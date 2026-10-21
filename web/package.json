@@ -1,6 +1,6 @@
 {
   "name": "investment-manager-web",
-  "version": "1.0.7",
+  "version": "1.1.0",
   "private": true,
   "description": "个人投资资产管理系统 · 前端（Vue3 + Vite + Element Plus + ECharts）",
   "license": "SEE LICENSE IN LICENSE",

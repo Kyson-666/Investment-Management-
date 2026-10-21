@@ -17,6 +17,7 @@ const prices = require('./prices');
 const { backupDatabase } = require('./backup');
 const portfolio = require('./portfolio');
 const Calc = require('../calc');
+const cache = require('./cache');
 
 function todayParts() {
   const d = new Date();
@@ -162,26 +163,30 @@ async function jobSyncQuotes(kinds) {
 }
 
 function startScheduler() {
-  // 汇率同步
-  cron.schedule(config.FX.syncCron, () => { jobSyncFx().catch(e => console.warn(`[cron] fx: ${e.message}`)); });
-  // 每日 00:10 定投
-  cron.schedule('10 0 * * *', jobDcaGenerate);
+  /* 定时任务经 service 层直接写库（不经 HTTP 层），执行后统一失效计算缓存 */
+  const after = fn => () => { try { fn(); } finally { cache.bumpAll(); } };
+  const afterAsync = p => p.finally ? p.finally(() => cache.bumpAll()) : Promise.resolve().then(cache.bumpAll);
+
+  // 汇率同步（写 fx_rate，全局生效）
+  cron.schedule(config.FX.syncCron, () => { afterAsync(jobSyncFx()).catch(e => console.warn(`[cron] fx: ${e.message}`)); });
+  // 每日 00:10 定投（写 event）
+  cron.schedule('10 0 * * *', after(jobDcaGenerate));
   // 每日 03:00 备份
   cron.schedule('0 3 * * *', () => { jobBackup(); });
-  // 每日 16:00 预警扫描
+  // 每日 16:00 预警扫描（只写通知，不触达组合数据）
   cron.schedule('0 16 * * *', jobScanAlerts);
-  // 每月最后一天 23:50 快照（每天 23:50 检查是否月末）
-  cron.schedule('50 23 * * *', () => { if (isLastDayOfMonth()) jobMonthlySnapshot(); });
-  /* 每月最后一天 23:55 同步基准指数月末点位（排在月末快照之后） */
-  cron.schedule('55 23 * * *', () => { if (isLastDayOfMonth()) jobSyncBenchmark().catch(() => {}); });
+  // 每月最后一天 23:50 快照（每天 23:50 检查是否月末；写 snapshot）
+  cron.schedule('50 23 * * *', () => { if (isLastDayOfMonth()) after(jobMonthlySnapshot)(); });
+  /* 每月最后一天 23:55 同步基准指数月末点位（排在月末快照之后；写 benchmark） */
+  cron.schedule('55 23 * * *', () => { if (isLastDayOfMonth()) afterAsync(jobSyncBenchmark()).catch(() => {}); });
 
   /* 行情同步：股票每 15 分钟一次；基金每日 21:05 一次（收盘净值公布后）。
-     休市/净值未更新时报价与现值一致 → 天然幂等空转。 */
-  cron.schedule(config.QUOTES.stockCron, () => { jobSyncQuotes(['stock']); });
-  cron.schedule(config.QUOTES.fundCron, () => { jobSyncQuotes(['fund']); });
+     休市/净值未更新时报价与现值一致 → 天然幂等空转（写 asset 价格/历史净值） */
+  cron.schedule(config.QUOTES.stockCron, () => { afterAsync(jobSyncQuotes(['stock'])).catch(() => {}); });
+  cron.schedule(config.QUOTES.fundCron, () => { afterAsync(jobSyncQuotes(['fund'])).catch(() => {}); });
 
   if (config.FX.syncOnStart) {
-    jobSyncFx().catch(e => console.warn(`[startup] fx: ${e.message}`));
+    afterAsync(jobSyncFx()).catch(e => console.warn(`[startup] fx: ${e.message}`));
   }
   console.log('[cron] 定时任务已启动');
 }

@@ -4,7 +4,7 @@ const express = require('express');
 const { getDb, now } = require('../db');
 const { authRequired } = require('../middleware/auth');
 const { asyncHandler, badRequest, notFound } = require('../middleware/helpers');
-const { deriveSnapshot } = require('../services/snapshots');
+const { deriveSnapshot, autofillSnapshots, diffReport } = require('../services/snapshots');
 
 const router = express.Router();
 router.use(authRequired);
@@ -35,6 +35,23 @@ router.get('/derive', (req, res) => {
   const saved = db.prepare('SELECT total FROM snapshot WHERE user_id=? AND month=?')
     .get(req.user.id, month);
   res.json(withDerived(db, req.user.id, month, saved ? saved.total : null));
+});
+
+/* 快照差异报告：全月份 saved vs derived 对账（仅 complete 月计算 diff） */
+router.get('/report', (req, res) => {
+  res.json(diffReport(getDb(), req.user.id));
+});
+
+/* 批量回填历史缺失月末快照（source='derived'，绝不覆盖已有快照）。
+ * body 可选：{from, to, includeCurrent}；缺省从最早数据月回填到上个月。 */
+router.post('/autofill', (req, res) => {
+  const opt = req.body || {};
+  for (const k of ['from', 'to']) {
+    if (opt[k] != null && !/^\d{4}-\d{2}$/.test(String(opt[k]))) {
+      return badRequest(res, `${k} 格式应为 YYYY-MM`);
+    }
+  }
+  res.json(autofillSnapshots(getDb(), req.user.id, opt));
 });
 
 router.post('/', asyncHandler(async (req, res) => {

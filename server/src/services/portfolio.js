@@ -5,6 +5,7 @@
  */
 const Calc = require('../calc');
 const { buildState } = require('../state');
+const cache = require('./cache');
 
 function round2(n) { return Math.round((+n || 0) * 100) / 100; }
 
@@ -32,6 +33,12 @@ function scope(S, accountId) {
 function computeAll(userId, accountId, options) {
   const sections = options && Array.isArray(options.sections) ? new Set(options.sections) : null;
   const want = k => !sections || sections.has(k);
+  /* 结果缓存：同一数据版本 + 相同参数直接复用（路由层只读，不修改返回对象） */
+  const cacheKey = `C|${cache.vOf(userId)}|${userId}|${accountId || ''}|`
+    + `${(options && options.asOf) || ''}|${sections ? [...sections].sort().join(',') : 'ALL'}`;
+  const cached = cache.getCache(cacheKey);
+  if (cached) return cached;
+
   const S = buildState(userId);
   const settings = S.fullSettings;
   const id = accountId ? String(accountId) : null;
@@ -233,7 +240,7 @@ function computeAll(userId, accountId, options) {
     fxCurrent: Calc.currentFx(S),
   };
 
-  return {
+  return cache.setCache(cacheKey, {
     kpis,
     warnings,
     settings,
@@ -256,13 +263,16 @@ function computeAll(userId, accountId, options) {
     tax: tax ? { ...tax, capGainRows } : null,
     reports: { months, years },
     cash,
-  };
+  });
 }
 
-/** 仅返回原始状态（/api/state 一次性拉取） */
+/** 仅返回原始状态（/api/state 一次性拉取），按数据版本缓存 */
 function rawState(userId) {
+  const key = `R|${cache.vOf(userId)}|${userId}`;
+  const cached = cache.getCache(key);
+  if (cached) return cached;
   const S = buildState(userId);
-  return {
+  const value = {
     settings: S.fullSettings,
     fx: S.fx,
     accounts: S.accounts,
@@ -273,6 +283,7 @@ function rawState(userId) {
     cashFlows: S.cashFlows,
     dcaPlans: S.dcaPlans,
   };
+  return cache.setCache(key, value);
 }
 
 /* scope 仅 computeAll 内部使用，不对外导出 */

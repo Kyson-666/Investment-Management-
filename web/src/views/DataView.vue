@@ -19,6 +19,8 @@
           <el-input-number v-model="snap.total" :min="0" :precision="2" size="small" controls-position="right" style="width:180px" placeholder="月末持仓市值" />
           <el-button size="small" @click="fillCurrent">填入当前持仓市值</el-button>
           <el-button size="small" type="primary" @click="saveSnap">保存快照</el-button>
+          <el-button size="small" :loading="autofilling" @click="autofillSnaps">回填缺失快照</el-button>
+          <el-button size="small" @click="showReport">差异报告</el-button>
         </div>
         <el-table :data="store.snapshots" size="small" max-height="340" empty-text="暂无快照">
           <el-table-column prop="month" label="月份" width="120" />
@@ -38,8 +40,7 @@
       </div>
 
       <div class="card">
-        <h3>基准点位（{{ benchCode }}，TWR 对比曲线的输入）</h3>
-        <div class="toolbar">
+        <h3>基准点位（{{ benchCode }}，TWR 对比曲线的输入）</h3>        <div class="toolbar">
           <el-date-picker v-model="bench.date" type="month" value-format="YYYY-MM" placeholder="月份" size="small" style="width:130px" />
           <el-input-number v-model="bench.value" :min="0" :precision="2" size="small" controls-position="right" style="width:180px" placeholder="月末收盘点位" />
           <el-button size="small" type="primary" @click="saveBench">保存点位</el-button>
@@ -97,6 +98,41 @@
         </div>
       </div>
     </div>
+
+    <el-dialog v-model="reportVisible" title="快照差异报告（已存快照 vs 事件重放派生）" width="760px">
+      <p class="form-tip" v-if="reportData" style="margin-top:0">
+        共 <b>{{ reportData.summary.months }}</b> 个月：已存 <b>{{ reportData.summary.saved }}</b>、
+        缺失 <b>{{ reportData.summary.missing }}</b>、
+        与派生不一致 <b>{{ reportData.summary.mismatch }}</b>、
+        缺净值（按当前价估算）<b>{{ reportData.summary.incomplete }}</b>；
+        最大差异 ¥{{ money(reportData.summary.maxAbsDiff) }}（{{ (reportData.summary.maxAbsDiffPct * 100).toFixed(2) }}%）。
+        差异「—」表示该月派生不完整（缺历史净值），不参与对账。
+      </p>
+      <el-table :data="reportData?.rows || []" size="small" max-height="420" empty-text="暂无数据">
+        <el-table-column prop="month" label="月份" width="96" />
+        <el-table-column label="已存快照" align="right">
+          <template #default="{ row }">{{ row.saved == null ? '—' : `¥${money(row.saved)}` }}</template>
+        </el-table-column>
+        <el-table-column label="来源" width="76">
+          <template #default="{ row }">{{ row.savedSource ? sourceLabel(row.savedSource) : '—' }}</template>
+        </el-table-column>
+        <el-table-column label="派生值" align="right">
+          <template #default="{ row }">¥{{ money(row.derived) }}</template>
+        </el-table-column>
+        <el-table-column label="差异" align="right">
+          <template #default="{ row }">{{ row.diff == null ? '—' : signedMoney(row.diff) }}</template>
+        </el-table-column>
+        <el-table-column label="差异率" width="90" align="right">
+          <template #default="{ row }">{{ row.diffPct == null ? '—' : `${(row.diffPct * 100).toFixed(2)}%` }}</template>
+        </el-table-column>
+        <el-table-column label="派生质量" width="104">
+          <template #default="{ row }">
+            <el-tag v-if="row.complete" type="success" size="small">完整</el-tag>
+            <el-tag v-else type="warning" size="small">估算 {{ row.estimatedPrice || 0 }} 项</el-tag>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-dialog>
   </div>
 </template>
 
@@ -219,6 +255,39 @@ async function delSnap(row) {
     text: `删除 ${row.month} 快照？`,
     request: () => snapshotsApi.remove(row.month),
   });
+}
+
+/* 批量回填历史缺失快照：按「事件重放 + 净值历史」派生，绝不覆盖已有快照 */
+const autofilling = ref(false);
+async function autofillSnaps() {
+  try {
+    await ElMessageBox.confirm(
+      '将按「事件重放 + 净值历史」派生历史月末持仓市值，回填所有缺失快照。'
+      + '已有快照（手工/自动/派生）一律跳过、绝不覆盖；缺净值历史、无法确定单价的资产不在该月派生。继续？',
+      '回填缺失快照', { type: 'info', confirmButtonText: '回填', cancelButtonText: '取消' });
+  } catch { return; }
+  autofilling.value = true;
+  try {
+    const r = await snapshotsApi.autofill({});
+    const parts = [];
+    if (r.filled.length) parts.push(`补齐 ${r.filled.length} 个月`);
+    if (r.incomplete.length) parts.push(`${r.incomplete.length} 个月缺净值、按当前价估算`);
+    if (r.skipped.length) parts.push(`跳过 ${r.skipped.length} 个已有`);
+    if (r.empty.length) parts.push(`${r.empty.length} 个无持仓月不落快照`);
+    ElMessage.success(`回填完成：${parts.length ? parts.join('、') : '没有需要回填的月份'}`);
+    await store.refreshAll();
+  } catch (e) { ElMessage.error(e.message); }
+  finally { autofilling.value = false; }
+}
+
+/* 差异报告：全月份 saved vs 派生对账 */
+const reportVisible = ref(false);
+const reportData = ref(null);
+async function showReport() {
+  try {
+    reportData.value = await snapshotsApi.report();
+    reportVisible.value = true;
+  } catch (e) { ElMessage.error(e.message); }
 }
 
 async function doExport() {

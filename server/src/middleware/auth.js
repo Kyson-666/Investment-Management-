@@ -7,6 +7,7 @@
 const jwt = require('jsonwebtoken');
 const { getDb } = require('../db');
 const { config } = require('../config');
+const cache = require('../services/cache');
 
 function signToken(user) {
   return jwt.sign(
@@ -35,6 +36,14 @@ function authRequired(req, res, next) {
   }
   req.user = user;
   req.token = token;
+  /* 计算缓存失效收口（前置失效，杜绝「写后读到旧值」的竞态）：
+     所有需要鉴权的写请求在进入业务处理前即失效该用户的数据版本。
+     /api/fx 维护全局汇率表，影响所有用户的重算结果，失效全部。 */
+  if (req.method !== 'GET') {
+    const url = req.originalUrl || req.url || '';
+    if (url.startsWith('/api/fx')) cache.bumpAll();
+    else cache.bumpUser(user.id);
+  }
   next();
 }
 

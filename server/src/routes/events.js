@@ -126,6 +126,13 @@ router.get('/', (req, res) => {
   if (req.query.accountId) { sql += ' AND a.account_id=?'; params.push(req.query.accountId); }
   if (req.query.kind) { sql += ' AND e.kind=?'; params.push(req.query.kind); }
   sql += ' ORDER BY e.date DESC, e.id DESC';
+  /* 可选分页：传 limit 才生效（SQL 下推），缺省全量保持向后兼容 */
+  const limit = parseInt(req.query.limit, 10);
+  const offset = parseInt(req.query.offset, 10) || 0;
+  if (Number.isFinite(limit) && limit > 0) {
+    sql += ' LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+  }
   res.json(db.prepare(sql).all(...params).map(mapRow));
 });
 
