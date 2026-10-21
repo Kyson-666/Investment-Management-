@@ -12,7 +12,7 @@
 
     <div class="kpi-row" style="grid-template-columns:repeat(4,1fr)">
       <div class="kpi"><div class="label">第一大持仓占比</div>
-        <div class="val num" :class="conc.top1 > conc.warnSingle ? 'down' : ''">{{ pct(conc.top1) }}</div>
+        <div class="val num" :class="conc.top1 > conc.warnSingle ? 'up' : ''">{{ pct(conc.top1) }}</div>
         <div class="sub">阈值 {{ pct(conc.warnSingle) }}</div></div>
       <div class="kpi"><div class="label">前 5 大合计</div>
         <div class="val num" :class="conc.top5 > conc.warnTop5 ? 'down' : ''">{{ pct(conc.top5) }}</div>
@@ -38,8 +38,8 @@
                   <td class="bold">{{ r.name }}</td>
                   <td><span :class="'badge ' + TYPE_BADGE[r.type]">{{ TYPE_LABEL[r.type] }}</span></td>
                   <td class="num">¥{{ money(r.mv) }}</td>
-                  <td class="num bold" :class="r.pct > conc.warnSingle ? 'down' : ''">{{ pct(r.pct) }}</td>
-                  <td><div class="alloc-bar"><div :style="{ width: (r.pct * 100) + '%', background: r.pct > conc.warnSingle ? '#e0463e' : '#2b6cb0' }"></div></div></td>
+                  <td class="num bold" :class="r.pct > conc.warnSingle ? 'up' : ''">{{ pct(r.pct) }}</td>
+                  <td><div class="alloc-bar"><div :style="{ width: (r.pct * 100) + '%', background: r.pct > conc.warnSingle ? theme.up() : theme.primary() }"></div></div></td>
                 </tr>
               </tbody>
             </table>
@@ -66,9 +66,9 @@
             </el-table-column>
             <el-table-column label="状态" min-width="160">
               <template #default="{ row }">
-                <el-tag v-if="(row.tp && row.current >= row.tp) || (row.tpRate && row.rate != null && row.rate >= row.tpRate)" type="danger" size="small" effect="plain">已达止盈，可止盈</el-tag>
-                <el-tag v-else-if="(row.sl && row.current <= row.sl) || (row.slRate && row.rate != null && row.rate <= -row.slRate)" type="info" size="small" effect="plain">已破止损，建议止损</el-tag>
-                <el-tag v-else type="success" size="small" effect="plain">正常持有</el-tag>
+                <span v-if="(row.tp && row.current >= row.tp) || (row.tpRate && row.rate != null && row.rate >= row.tpRate)" class="badge badge-danger">已达止盈，可止盈</span>
+                <span v-else-if="(row.sl && row.current <= row.sl) || (row.slRate && row.rate != null && row.rate <= -row.slRate)" class="badge badge-warn">已破止损，建议止损</span>
+                <span v-else class="badge badge-ok">正常持有</span>
               </template>
             </el-table-column>
           </el-table>
@@ -113,6 +113,7 @@ import { ElMessage } from 'element-plus';
 import { usePortfolioStore } from '../stores/portfolio';
 import { alertsApi, authApi } from '../api';
 import { money, pct, signedPct, signClass, TYPE_LABEL, TYPE_BADGE, ccyName } from '../utils/format';
+import * as theme from '../utils/theme';
 
 const store = usePortfolioStore();
 const conc = computed(() => store.d?.concentration || { list: [], top1: 0, top5: 0, byType: {}, warnSingle: 0.2, warnTop5: 0.6, alerts: [] });

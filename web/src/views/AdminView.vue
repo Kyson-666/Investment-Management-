@@ -31,9 +31,9 @@
           <el-table-column prop="email" label="邮箱" min-width="180" />
           <el-table-column label="角色" width="90">
             <template #default="{ row }">
-              <el-tag size="small" :type="row.role === 'admin' ? 'warning' : 'info'" effect="plain">
+              <span class="badge" :class="row.role === 'admin' ? 'badge-warn' : 'badge-gray'">
                 {{ row.role === 'admin' ? '管理员' : '普通用户' }}
-              </el-tag>
+              </span>
             </template>
           </el-table-column>
           <el-table-column label="状态" width="90">

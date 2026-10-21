@@ -67,6 +67,7 @@
 import { ref, computed, watch } from 'vue';
 import { usePortfolioStore } from '../stores/portfolio';
 import { money, signedMoney, signClass } from '../utils/format';
+import * as theme from '../utils/theme';
 import EChart from '../components/EChart.vue';
 
 const store = usePortfolioStore();
@@ -93,8 +94,8 @@ const barOption = computed(() => {
     xAxis: { type: 'category', data: rows.map(r => r.month.slice(5)) },
     yAxis: { type: 'value', axisLabel: { formatter: v => (v / 1000) + 'k' } },
     series: [
-      { name: '已实现', type: 'bar', data: rows.map(r => Math.round(r.real * 100) / 100), itemStyle: { color: '#2b6cb0' } },
-      { name: '含浮动', type: 'bar', data: rows.map(r => r.floatTotal != null ? Math.round(r.floatTotal * 100) / 100 : null), itemStyle: { color: '#e8a93b' } },
+      { name: '已实现', type: 'bar', data: rows.map(r => Math.round(r.real * 100) / 100), itemStyle: { color: theme.primary() } },
+      { name: '含浮动', type: 'bar', data: rows.map(r => r.floatTotal != null ? Math.round(r.floatTotal * 100) / 100 : null), itemStyle: { color: theme.warn() } },
     ],
   };
 });

@@ -92,6 +92,7 @@ import { ref, computed } from 'vue';
 import { usePortfolioStore } from '../stores/portfolio';
 import { assetsApi } from '../api';
 import { money, signedMoney, signedPct, pct, signClass, TYPE_LABEL, TYPE_COLORS, ACCOUNT_KIND_LABEL } from '../utils/format';
+import * as theme from '../utils/theme';
 import AssetCard from '../components/AssetCard.vue';
 import EChart from '../components/EChart.vue';
 import OpsDialogs from '../components/OpsDialogs.vue';
@@ -124,7 +125,8 @@ const donutOption = computed(() => {
 });
 
 function barColor(i) {
-  return ['#1f3a5f', '#2b6cb0', '#17a2b8', '#3aa6a0', '#7c52b8', '#e8a93b', '#e08a3e', '#9aa6b2'][i % 8];
+  const p = theme.palette();
+  return p[i % p.length];
 }
 function kindLabel(k) { return ACCOUNT_KIND_LABEL[k] || k; }
 

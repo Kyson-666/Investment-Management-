@@ -40,7 +40,7 @@
           <span class="user-name" style="cursor:pointer;display:flex;align-items:center;gap:5px">
             <el-icon><UserFilled /></el-icon>
             <span class="uname-text">{{ auth.username }}</span>
-            <el-tag v-if="auth.isAdmin" size="small" effect="dark" type="warning">管理员</el-tag>
+            <span v-if="auth.isAdmin" class="badge badge-warn">管理员</span>
           </span>
           <template #dropdown>
             <el-dropdown-menu>
@@ -70,7 +70,7 @@
           <div class="drawer-user">
             <el-icon><UserFilled /></el-icon>
             {{ auth.username }}
-            <el-tag v-if="auth.isAdmin" size="small" effect="dark" type="warning">管理员</el-tag>
+            <span v-if="auth.isAdmin" class="badge badge-warn">管理员</span>
           </div>
         </div>
 

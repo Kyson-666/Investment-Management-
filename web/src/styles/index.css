@@ -310,6 +310,8 @@ body {
 /* 涨跌语义色（与红涨绿跌一致，供文字标注使用） */
 .pos { color: var(--up); }
 .neg { color: var(--down); }
+/* 警示文字色（与 badge-warn 同色；用于「偏离/超限」等警示语义，区别于涨跌红绿） */
+.warn-text { color: var(--warn); }
 
 /* 表格横向滚动容器：窄屏下保留完整列，不做列裁剪 */
 .tbl-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }

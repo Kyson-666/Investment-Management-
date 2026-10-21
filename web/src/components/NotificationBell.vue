@@ -13,9 +13,9 @@
       <div v-if="!items.length" class="muted" style="padding:24px 0;text-align:center">暂无通知</div>
       <div v-for="n in items" :key="n.id" class="notify-item" :class="{ unread: !n.isRead }" @click="markRead(n)">
         <div class="t">
-          <el-tag size="small" :type="n.kind === 'price' ? 'danger' : 'warning'" effect="plain">
+          <span class="badge" :class="n.kind === 'price' ? 'badge-danger' : 'badge-warn'">
             {{ n.kind === 'price' ? '价格预警' : '集中度' }}
-          </el-tag>
+          </span>
           <span class="muted time">{{ fmt(n.createdAt) }}</span>
         </div>
         <div class="title">{{ n.title }}</div>

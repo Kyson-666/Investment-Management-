@@ -58,9 +58,9 @@
                 <td class="num">¥{{ money(r.tgtAmt) }}</td>
                 <td class="num bold" :class="signClass(r.adjust)">{{ signedMoney(r.adjust) }}</td>
                 <td>
-                  <el-tag v-if="Math.abs(r.diff) < alloc.total * 0.02" size="small" type="info" effect="plain">基本平衡</el-tag>
-                  <el-tag v-else-if="r.diff > 0" size="small" type="danger" effect="plain">超配，建议卖出</el-tag>
-                  <el-tag v-else size="small" type="success" effect="plain">低配，建议买入</el-tag>
+                  <span v-if="Math.abs(r.diff) < alloc.total * 0.02" class="badge badge-gray">基本平衡</span>
+                  <span v-else-if="r.diff > 0" class="badge badge-danger">超配，建议卖出</span>
+                  <span v-else class="badge badge-ok">低配，建议买入</span>
                 </td>
               </tr>
             </tbody>
@@ -92,6 +92,7 @@ import { ElMessage, ElMessageBox } from 'element-plus';
 import { usePortfolioStore } from '../stores/portfolio';
 import { authApi } from '../api';
 import { money, signedMoney, pct, signClass, TYPE_LABEL, TYPE_BADGE, TYPE_COLORS } from '../utils/format';
+import * as theme from '../utils/theme';
 import EChart from '../components/EChart.vue';
 
 const store = usePortfolioStore();
@@ -128,16 +129,16 @@ const marketRows = computed(() => {
     else cn += h.mvCNY || 0;
   }
   return [
-    { key: 'CN', label: '境内（CNY 计价）', ccy: 'CNY', mv: cn, color: '#e0463e' },
-    { key: 'US', label: '境外（USD 计价）', ccy: 'USD', mv: us, color: '#2b6cb0' },
+    { key: 'CN', label: '境内（CNY 计价）', ccy: 'CNY', mv: cn, color: theme.up() },
+    { key: 'US', label: '境外（USD 计价）', ccy: 'USD', mv: us, color: theme.primary() },
   ];
 });
 
 const driftLevel = computed(() => {
   const p = alloc.value.driftPct || 0;
   if (p <= 0.03) return { text: '基本贴合目标', cls: 'pos', badge: 'badge-ok' };
-  if (p <= 0.10) return { text: '轻度偏离，可观察', cls: '', badge: 'badge-warn' };
-  return { text: '偏离较大，建议再平衡', cls: 'neg', badge: 'badge-danger' };
+  if (p <= 0.10) return { text: '轻度偏离，可观察', cls: 'warn-text', badge: 'badge-warn' };
+  return { text: '偏离较大，建议再平衡', cls: 'up', badge: 'badge-danger' };
 });
 
 const donutOption = computed(() => ({
@@ -153,7 +154,7 @@ const donutOption = computed(() => ({
 }));
 
 function barColor(i) {
-  return ['#1f3a5f', '#2b6cb0', '#17a2b8', '#3aa6a0', '#7c52b8'][Number(i) - 1] || '#9aa6b2';
+  return theme.palette()[Number(i) - 1] || theme.muted();
 }
 
 async function save() {

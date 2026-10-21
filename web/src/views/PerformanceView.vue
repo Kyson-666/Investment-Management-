@@ -69,6 +69,7 @@
 import { computed } from 'vue';
 import { usePortfolioStore } from '../stores/portfolio';
 import { signedPct, signClass, money } from '../utils/format';
+import * as theme from '../utils/theme';
 import EChart from '../components/EChart.vue';
 
 const store = usePortfolioStore();
@@ -105,8 +106,8 @@ const twrOption = computed(() => {
     xAxis: { type: 'category', data: s.map(r => r.month) },
     yAxis: { type: 'value', axisLabel: { formatter: v => (v * 100).toFixed(0) + '%' } },
     series: [
-      { name: '组合 TWR', type: 'line', smooth: true, data: s.map(r => r.port), itemStyle: { color: '#e0463e' } },
-      { name: '基准', type: 'line', smooth: true, data: s.map(r => r.bench), itemStyle: { color: '#2b6cb0' } },
+      { name: '组合 TWR', type: 'line', smooth: true, data: s.map(r => r.port), itemStyle: { color: theme.up() } },
+      { name: '基准', type: 'line', smooth: true, data: s.map(r => r.bench), itemStyle: { color: theme.primary() } },
     ],
   };
 });
@@ -120,13 +121,13 @@ const cashOption = computed(() => {
     return {
       date: f.date,
       value: f.kind === 'deposit' ? cny : -cny,
-      itemStyle: { color: f.kind === 'deposit' ? '#2b6cb0' : '#9aa6b2' },
+      itemStyle: { color: f.kind === 'deposit' ? theme.primary() : theme.muted() },
     };
   });
   /* 与引擎口径一致：XIRR 期末可变现净值 = 持仓市值 + 账户现金 − 融资 */
   const total = (store.kpis.mv || 0) + (store.kpis.cash || 0) - (store.kpis.marginTotal || 0);
   if (total) {
-    points.push({ date: '当前', value: total, itemStyle: { color: '#e0463e' } });
+    points.push({ date: '当前', value: total, itemStyle: { color: theme.up() } });
   }
   return {
     tooltip: {

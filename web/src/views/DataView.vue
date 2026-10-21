@@ -127,8 +127,8 @@
         </el-table-column>
         <el-table-column prop="complete" label="派生质量" width="112">
           <template #default="{ row }">
-            <el-tag v-if="row.complete" type="success" size="small">完整</el-tag>
-            <el-tag v-else type="warning" size="small">估算 {{ row.estimatedPrice || 0 }} 项</el-tag>
+            <span v-if="row.complete" class="badge badge-ok">完整</span>
+            <span v-else class="badge badge-warn">估算 {{ row.estimatedPrice || 0 }} 项</span>
           </template>
         </el-table-column>
       </el-table>

@@ -30,7 +30,7 @@
           <div class="tx-top">
             <span class="tx-date num">{{ row.date }}</span>
             <span class="badge" :class="kindBadge(row.kind)">{{ EVENT_LABEL[row.kind] }}</span>
-            <el-tag v-if="row.isT" size="small" type="warning" effect="plain">T</el-tag>
+            <span v-if="row.isT" class="badge badge-warn">T</span>
             <span class="spacer"></span>
             <b class="num">{{ cnyAmount(row) }}</b>
           </div>
@@ -79,7 +79,7 @@
         <el-table-column label="标的" min-width="130">
           <template #default="{ row }">
             {{ assetOf(row.assetId)?.name || '—' }}
-            <el-tag v-if="row.isT" size="small" type="warning" effect="plain" style="margin-left:4px">T</el-tag>
+            <span v-if="row.isT" class="badge badge-warn" style="margin-left:4px">T</span>
           </template>
         </el-table-column>
         <el-table-column label="类型" width="100">
