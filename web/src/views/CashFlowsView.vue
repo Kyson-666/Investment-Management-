@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <h2>现金流水</h2>
-        <div class="sub">现金流水包含：出入金（外部本金）、内部划转（账户间搬运）、现金校准（对账差额）。净入金是累计投入的主要部分；累计投入 = 净入金 + 期初建仓</div>
+        <div class="sub">现金流水包含：出入金（外部本金）、内部划转（账户间搬运）、现金校准（对账差额）。累计投入按<b>净入金</b>计；仅在完全没有出入金记录时，才以期初建仓本金作为投入基数（二者并存时不重复相加）</div>
         <div class="sub" style="margin-top:2px">出入金记录<b>外部资金进出账户</b>；账户间划转用「内部划转」；与对账单的差额用「现金校准」。买入/申购属于账户内部资产转换，请勿重复登记入金。</div>
       </div>
       <div class="actions">
@@ -27,7 +27,7 @@
       <div class="kpi"><div class="label">累计入金 (CNY)</div><div class="val num up">¥{{ money(cash.deposit) }}</div></div>
       <div class="kpi"><div class="label">累计出金 (CNY)</div><div class="val num down">¥{{ money(cash.withdraw) }}</div></div>
       <div class="kpi"><div class="label">净入金 (CNY)</div><div class="val num">¥{{ money(cash.net) }}</div>
-        <div class="sub num muted">累计投入 = 本项 + 期初建仓</div></div>
+        <div class="sub num muted">累计投入 = 本项（无出入金记录时期初建仓充当投入）</div></div>
       <div class="kpi"><div class="label">账户现金 (CNY)</div>
         <div class="val num" :class="cash.cash < 0 ? 'down' : ''">¥{{ money(cash.cash) }}</div>
         <div class="sub num muted">入金 − 出金 ± 内部划转 − 买入/申购自付 + 卖出/赎回净额 + 分红/利息 ± 现金校准<br>（融资买入只扣自付；期初建仓不产生现金流）</div></div>

@@ -78,6 +78,37 @@ test('P1-1 期初建仓计入累计投入：1000→1200 收益率为 20%', () =>
   assert.ok(Math.abs(s.rate - 0.2) < 1e-9, `rate 应 20%，实得 ${s.rate}`);
 });
 
+test('P1-1b 期初建仓与等额入金并存：累计投入不翻倍（按净入金计）', () => {
+  /* 同一笔钱被同时录成「期初建仓（记账前成本）」与「入金（记账期内转入）」，
+     v1.0.7–v1.0.9 会相加导致累计投入翻倍、收益率腰斩；v1.0.10 起按净入金计。 */
+  const S = base({
+    assets: [{ id: 'S', accountId: 'A', name: '股票', type: 'stock', currency: 'CNY', price: 12 }],
+    events: [{ assetId: 'S', date: '2025-01-05', side: 'opening', qty: 100, price: 10, fx: 1 }],
+    cashFlows: [{ id: 'c1', accountId: 'A', date: '2025-01-05', kind: 'deposit', amount: 1000, fx: 1 }],
+  });
+  const s = C.summary(S);
+  assert.equal(s.netDeposit, 1000);
+  assert.equal(s.openingCost, 1000);
+  assert.equal(s.invest, 1000, `累计投入应按净入金计，不应翻倍为 2000，实得 ${s.invest}`);
+  assert.equal(s.effectiveInvest, 2000, '内部有效投入口径不变（净入金 + 期初建仓）');
+  /* 200 收益 ÷ 1000 投入 = 20%（若翻倍则只有 10%） */
+  assert.ok(Math.abs(s.rate - 0.2) < 1e-9, `rate 应 20%，实得 ${s.rate}`);
+  /* 恒等式按内部口径校验：profit = netWorth − effectiveInvest */
+  assert.ok(Math.abs(s.profit - (s.mv + s.cash - s.marginTotal - s.effectiveInvest)) < 0.01,
+    `恒等式偏差 ${s.profit - (s.mv + s.cash - s.marginTotal - s.effectiveInvest)}`);
+});
+
+test('P1-1c 仅入金无期初：累计投入 = 净入金（与 v1.0.6 一致）', () => {
+  const S = base({
+    assets: [{ id: 'S', accountId: 'A', name: '股票', type: 'stock', currency: 'CNY', price: 10 }],
+    events: [{ assetId: 'S', date: '2026-01-05', side: 'buy', qty: 100, price: 10, fx: 1 }],
+    cashFlows: [{ id: 'c1', accountId: 'A', date: '2026-01-05', kind: 'deposit', amount: 1000, fx: 1 }],
+  });
+  const s = C.summary(S);
+  assert.equal(s.invest, 1000);
+  assert.equal(s.rate, 0);
+});
+
 test('P1-2 资产级“已实现”与组合级同义（含分红/利息）', () => {
   const S = base({
     assets: [{ id: 'S', accountId: 'A', name: '股票', type: 'stock', currency: 'CNY', price: 10 }],

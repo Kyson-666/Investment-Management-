@@ -3,10 +3,12 @@
  * 纯函数、无依赖，Node 与浏览器通用（刻意保持单文件 UMD，可脱离 DB 单测）。
  *
  * 现行口径（唯一权威，旧 v4/v5 双口径已废弃）：
- *  1. 累计投入 invest = 净入金 + 期初建仓本金 = effectiveInvest
+ *  1. 累计投入 invest = 净入金；若完全没有出入金记录则退回期初建仓本金
+ *     （二者并存时期初建仓只作持仓成本基准，不再重复计入，避免同一笔钱双计；
+ *       内部口径 effectiveInvest = 净入金 + 期初建仓 + 账户划转，仅用于恒等式校验）
  *  2. 累计收益 profit = 已实现（卖出/赎回） + 分红 + 利息 + 浮动
  *  3. 收益率 rate = profit / invest；invest <= 0 返回 null（前端显示“—”）
- *  4. 恒等式：profit ≡ 持仓市值 + 账户现金 − 融资 − invest
+ *  4. 恒等式：profit ≡ 持仓市值 + 账户现金 − 融资 − effectiveInvest
  *  5. XIRR 期末值 = 持仓市值 + 账户现金 − 融资（融资是负债，不是期末可变现资产）
  *  6. 月末快照只存持仓市值，故月度/TWR 的外部资金流 = 证券净投入；
  *     断档月必须累加区间内所有净投入，不能只扣当前月。
@@ -478,7 +480,10 @@
       });
       const cf = accountCash(S, Object.assign({}, opts, { accountId: acc.id }));
       const profit = round2(profitInvest + (cf.adjustCNY || 0));  // 含现金校准（其他损益）
-      const invest = cf.effectiveInvest;            // 累计投入 = 净入金 + 期初建仓本金
+      /* 账户视角累计投入：口径同组合（净入金优先，无出入金记录时退回期初建仓），
+         并叠加内部划转净额（划转是资金进出该账户，组合视角两边抵消） */
+      const transferNet = round2((cf.transferInCNY || 0) - (cf.transferOutCNY || 0));
+      const invest = round2((Math.abs(cf.netDeposit) > 1e-9 ? cf.netDeposit : cf.openingCost) + transferNet);
       return {
         account: acc, count: assets.length,
         mv: round2(mv), cash: cf.cash, cashCurrent: cf.cashCurrent,
@@ -552,15 +557,23 @@
       return { a, r, mv: r.mvCNY || 0, profit: assetTotal(r) };
     });
     const cf = accountCash(S, opts);
-    /* 单一口径（本次统一）：
-     *   累计投入 = 净入金 + 期初建仓本金 = effectiveInvest
+    /* 单一口径（v1.0.10 修正）：
+     *   累计投入 = 净入金；若**完全没有出入金记录**则退回期初建仓本金
      *   累计收益 = 已实现 + 分红 + 利息 + 浮动
      *   收益率   = 累计收益 ÷ 累计投入（<=0 时 null，前端显示“—”）
+     *
+     * 为什么不是「净入金 + 期初建仓」（v1.0.7–v1.0.9 口径）：
+     *   期初建仓与入金常是**同一笔钱的两种表达**（记账前的持仓成本 + 记账期内转入的钱），
+     *   两者相加会让累计投入翻倍、收益率腰斩。二者并存时，期初建仓只作为持仓成本基准，
+     *   不再重复计入投入；只有当完全没有出入金记录时，才用期初建仓本金充当投入基数，
+     *   保证「仅期初建仓」场景仍能计算收益率。
+     *   恒等式校验仍使用内部口径 effectiveInvest（净入金 + 期初建仓 + 划转），保证数学自洽。
      */
     const cashAdjust = cf.adjustCNY || 0;
     const totalReal = round2(real + cashAdjust);       // 已实现 + 现金校准（其他损益）
     const profit = round2(totalReal + unreal);
-    const invest = cf.effectiveInvest;
+    const transferNet = accountId ? round2((cf.transferInCNY || 0) - (cf.transferOutCNY || 0)) : 0;
+    const invest = round2((Math.abs(cf.netDeposit) > 1e-9 ? cf.netDeposit : cf.openingCost) + transferNet);
     const netWorth = round2(mv + cf.cash - marginTotal);
     return {
       /* 持仓构成 */
@@ -569,7 +582,7 @@
       real: totalReal, unreal: round2(unreal), cashIncome: round2(cashIncome),
       cashAdjust: round2(cashAdjust),
       /* 单一口径三件套 */
-      invest,                               // 累计投入 = 净入金 + 期初建仓
+      invest,                               // 累计投入 = 净入金（无出入金记录时退回期初建仓）
       profit,                               // 累计收益（唯一口径）
       rate: invest > 0 ? profit / invest : null,
       /* 诊断用（管理页/告警） */
@@ -587,8 +600,10 @@
       cashFxGain: cf.cashFxGain,
       realizableTotal: round2(mv + cf.cash),
       netWorth,
-      /* 恒等式校验：profit 应等于 netWorth − invest（误差 <= 0.01） */
-      identityDiff: round2(profit - (netWorth - invest)),
+      /* 恒等式校验：profit 应等于 netWorth − 有效投入
+         （校验用内部口径 effectiveInvest：净入金 + 期初建仓 + 划转；
+         展示口径 invest 在「期初建仓与入金重复表达」时小于它，属预期） */
+      identityDiff: round2(profit - (netWorth - cf.effectiveInvest)),
       rows
     };
   }
