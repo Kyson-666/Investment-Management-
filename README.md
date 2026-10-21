@@ -162,7 +162,7 @@ npm run dev                # http://localhost:5173 ，/api 自动代理到 8080
 **方式一：使用预构建镜像（推荐，无需本地构建）**
 
 ```bash
-cp .env.example .env        # 修改 JWT_SECRET、CONFIG_SECRET、ADMIN_PASSWORD
+cp .env.example .env        # 修改 ADMIN_PASSWORD；JWT_SECRET 可留空（首启自动生成）
 docker compose pull         # 拉取 ghcr.io/hanyuestar/investment-management:latest
 docker compose up -d
 docker compose ps           # healthcheck 变为 healthy 后访问 http://localhost:8080
@@ -186,8 +186,8 @@ docker compose up -d --build
 
 **通用说明**
 
-- **生产环境必须把 `JWT_SECRET` 改为至少 32 位随机值**；仍使用默认/示例值时服务会拒绝启动（防止默认密钥部署）。
-- 数据库与备份持久化在宿主机 `./data`；
+- **`JWT_SECRET` 留空即可**：服务首次启动会自动生成随机密钥并持久化到 `data/.jwt-secret`（重建容器不变）；多实例共享数据卷或需固定密钥时，才在 `.env` 中显式填写 32 位以上随机值（示例值/弱值会被拒绝并改用自动生成）。
+- 数据库与备份持久化在宿主机 `./data`；`data/.jwt-secret` 请一并保留（删除后重启会生成新密钥，现有登录失效、SMTP 密码需重填）；
 - 容器内时区默认 `Asia/Shanghai`；
 - 定时任务（汇率 / 定投 / 备份 / 预警 / 月末快照）在容器内运行；
 - 升级时 `docker compose pull && docker compose up -d`（或重新 `build`）即可，SQLite 表使用 `CREATE TABLE IF NOT EXISTS`，数据不丢。
@@ -280,7 +280,17 @@ npm test                   # = calc 115 断言 + api 54 用例 + regression 15 �
 
 ### v1.0.9（2026-10-21）
 
-> 视觉一致性与工程约定的维护性版本；**无口径变更、无数据结构变更**，功能行为与 v1.0.8 一致。
+> 视觉一致性维护 + **部署启动修复**。无口径变更、无数据结构变更。
+> ⚠️ 含一项部署阻塞修复：`.env` 未提供合法 `JWT_SECRET` 时容器启动即退出的问题（v1.0.7–v1.0.9 早期构建）。
+
+#### 部署启动修复（重要）
+
+- **根因**：`.env.example` 与 `docker-compose.yml` 的默认值为示例串 `please-change-this-to-a-random-secret`，而生产校验会判定其为弱密钥（含 `please/change/secret`）→ 抛错退出；按文档 `cp .env.example .env` 后未改该值即无法启动。
+- **修复**：未配置有效 `JWT_SECRET` 时，服务首次启动**自动生成随机密钥并持久化到 `data/.jwt-secret`**（重建容器不变、密钥不写入日志）；显式配置合法值仍优先；示例默认值改为留空。
+- **升级提示**：从使用示例/默认密钥的旧版本升级后会自动生成新密钥 —— 需**重新登录**；若配置过 SMTP，请**重新填写邮箱密码**（加密密钥随 JWT_SECRET 变更）。
+- **测试**：新增 `config.test.js` 3 用例（自动生成并持久化 / 示例值视为未配置 / 复用与显式优先）。
+
+#### 视觉一致性与工程约定
 
 - **主题色单一来源**：新增 `utils/theme.js`，由 `styles/index.css` 的 CSS 变量统一取色（含兜底常量），图表调色板集中维护；替换总览 / 配置 / 绩效 / 风险 / 报表等页面的硬编码色值，消除主题色漂移。
 - **徽章体系统一**：13 处 `el-tag` 全部替换为项目自有 `badge-*`（gray / ok / warn / danger），覆盖页面与组件，消除两套徽章体系造成的视觉与尺寸差异。

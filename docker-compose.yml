@@ -16,7 +16,9 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=8080
-      - JWT_SECRET=${JWT_SECRET:-please-change-this-to-a-random-secret}
+      # 留空即由服务自动生成随机密钥并持久化到 data/.jwt-secret（首次启动写入，重建容器不变）。
+      # 多实例共享数据卷或需固定密钥时，请在 .env 中显式设置 32 位以上随机值。
+      - JWT_SECRET=${JWT_SECRET:-}
       - CONFIG_SECRET=${CONFIG_SECRET:-}
       - JWT_EXPIRES_IN=${JWT_EXPIRES_IN:-7d}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}

@@ -11,7 +11,7 @@
     "dev": "node --watch src/server.js",
     "test:calc": "node test/calc.test.js",
     "test:api": "node --test test/api.test.js",
-    "test": "node test/calc.test.js && node --test test/api.test.js && node --test test/migrate.test.js && node --test test/quotes.test.js && node --test test/regression.test.js && node ../scripts/check-caliber.mjs",
+    "test": "node test/calc.test.js && node --test test/api.test.js && node --test test/migrate.test.js && node --test test/quotes.test.js && node --test test/regression.test.js && node --test test/config.test.js && node ../scripts/check-caliber.mjs",
     "check:caliber": "node ../scripts/check-caliber.mjs",
     "seed:demo": "node scripts/seed-demo.js"
   },
