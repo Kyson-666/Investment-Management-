@@ -13,7 +13,7 @@
     <div class="kpi" :class="{ flash: flashing }">
       <div class="label">累计投入 (CNY)</div>
       <div class="val num">¥{{ money(k.invest) }}</div>
-      <div class="sub num muted">净入金 + 期初建仓</div>
+      <div class="sub num muted">净入金（无出入金记录时期初建仓充当基数）</div>
     </div>
     <div class="kpi" :class="{ flash: flashing }">
       <div class="label">累计收益 (CNY)</div>
