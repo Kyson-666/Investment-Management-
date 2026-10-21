@@ -109,6 +109,35 @@ test('P1-1c 仅入金无期初：累计投入 = 净入金（与 v1.0.6 一致）
   assert.equal(s.rate, 0);
 });
 
+test('P1-1d 期初融资不计入有效投入：恒等式归零（实测用户数据 31107.41）', () => {
+  /* 还原真实数据：IBKR 全球存储 700 股
+     · 期初建仓 500 股成本 233,122.96（fx 7.0006），期初融资 31,107.41
+     · 后买 200 股成交 70,950.37，全额融资（自付 0）→ 融资合计 102,057.78
+     · 入金 148,602.27；现价 47.72 USD，当前汇率 6.6937
+     期初融资是借款：既作负债扣净资产，若又全额计入有效投入即双重计入，
+     恒等式会相差 31,107.41（修复前实测值），修复后应为 0。 */
+  const S = base({
+    accounts: [{ id: 'A', currency: 'USD', kind: 'broker' }],
+    fx: [{ date: '2026-01-05', rate: 7.0006 }, { date: '2026-02-05', rate: 7.0006 }, { date: '2026-12-31', rate: 6.6937 }],
+    assets: [{ id: 'S', accountId: 'A', name: '全球存储', type: 'stock', currency: 'USD', price: 47.72, marginCNY: 31107.41 }],
+    events: [
+      { assetId: 'S', date: '2026-01-05', kind: 'opening', side: 'opening', qty: 500, price: 233122.96 / 500 / 7.0006, amount: 233122.96, fx: 7.0006, fee: 0 },
+      { assetId: 'S', date: '2026-02-05', kind: 'buy', side: 'buy', qty: 200, price: 70950.37 / 200 / 7.0006, amount: 70950.37, marginCNY: 70950.37, fx: 7.0006, fee: 0 },
+    ],
+    cashFlows: [{ id: 'c1', accountId: 'A', date: '2026-01-07', kind: 'deposit', amount: 148602.27 / 6.8061, fx: 6.8061 }],
+  });
+  const s = C.summary(S, { asOf: '2026-12-31' });
+  assert.equal(s.openingMargin, 31107.41, `期初融资应识别为 31107.41，实得 ${s.openingMargin}`);
+  assert.equal(s.marginTotal, 102057.78, `融资合计应为 102057.78，实得 ${s.marginTotal}`);
+  assert.equal(s.openingCost, 233122.96);
+  /* 有效投入 = 净入金 + 期初建仓 − 期初融资 */
+  assert.equal(s.effectiveInvest, Math.round((s.netDeposit + s.openingCost - s.openingMargin) * 100) / 100);
+  assert.ok(Math.abs(s.identityDiff) < 0.01,
+    `恒等式应归零（修复前相差 31107.41），实得 ${s.identityDiff}`);
+  /* 展示口径不受影响：累计投入仍为净入金 */
+  assert.equal(s.invest, s.netDeposit);
+});
+
 test('P1-2 资产级“已实现”与组合级同义（含分红/利息）', () => {
   const S = base({
     assets: [{ id: 'S', accountId: 'A', name: '股票', type: 'stock', currency: 'CNY', price: 10 }],

@@ -5,7 +5,8 @@
  * 现行口径（唯一权威，旧 v4/v5 双口径已废弃）：
  *  1. 累计投入 invest = 净入金；若完全没有出入金记录则退回期初建仓本金
  *     （二者并存时期初建仓只作持仓成本基准，不再重复计入，避免同一笔钱双计；
- *       内部口径 effectiveInvest = 净入金 + 期初建仓 + 账户划转，仅用于恒等式校验）
+ *       内部口径 effectiveInvest = 净入金 + 期初建仓 − 期初融资 + 账户划转，仅用于恒等式校验
+ *       （期初融资是借款，已作负债扣净资产，不能再算作自有投入）
  *  2. 累计收益 profit = 已实现（卖出/赎回） + 分红 + 利息 + 浮动
  *  3. 收益率 rate = profit / invest；invest <= 0 返回 null（前端显示“—”）
  *  4. 恒等式：profit ≡ 持仓市值 + 账户现金 − 融资 − effectiveInvest
@@ -305,7 +306,7 @@
       const a = (S.accounts || []).find(x => x.id === id);
       return a && a.currency === 'USD' ? 'USD' : 'CNY';
     };
-    let cash = 0, dep = 0, wd = 0, openCost = 0, marginBal = 0, adjust = 0;
+    let cash = 0, dep = 0, wd = 0, openCost = 0, marginBal = 0, adjust = 0, openingMargin = 0;
     let transferIn = 0, transferOut = 0;
     const byCcy = { CNY: 0, USD: 0 };
     /* 现金流水：deposit/withdraw 是外部现金流；transfer 是内部划转（两条腿）；
@@ -347,6 +348,7 @@
       /* 融资时序演进（与 calcUnified 一致）：
          期初融资 + 各笔买入融资 − 卖出所得优先偿还部分 */
       let mBal = +a.marginCNY > 0 ? +a.marginCNY : 0;
+      openingMargin += mBal;                     // 期初融资：记账前已存在的融资余额（属借款，非自有投入）
       eventsOf(S, a.id, asOf).forEach(e => {
         const act = actionOf(e);
         const f = e.fx || 1;
@@ -398,7 +400,12 @@
          组合视角：划转两边抵消，不计入累计投入。 */
       transferInCNY: round2(transferIn),
       transferOutCNY: round2(transferOut),
-      effectiveInvest: round2(dep - wd + openCost + (accId ? transferIn - transferOut : 0)),
+      /* 有效投入（内部口径，用于恒等式校验）= 净入金 + 期初建仓 − 期初融资 + 划转。
+         期初融资是**借来的钱**：它已作为负债扣减净资产（marginTotal），
+         若再全额计入投入就会双重计入，使恒等式相差「期初融资」（用户实测 31107.41）。
+         买入融资不在此扣减——那部分成本通过买入事件进入持仓，未计入 openCost。 */
+      openingMargin: round2(openingMargin),
+      effectiveInvest: round2(dep - wd + openCost - openingMargin + (accId ? transferIn - transferOut : 0)),
       /* 现金的“当前价值”与汇兑差额：仅展示，不改变累计收益口径。
          账户现金按发生日汇率记账（与成本锁定一致），cashCurrent 按当前汇率重估。 */
       cashByCcy: { CNY: round2(byCcy.CNY), USD: round2(byCcy.USD) },
@@ -586,7 +593,8 @@
       profit,                               // 累计收益（唯一口径）
       rate: invest > 0 ? profit / invest : null,
       /* 诊断用（管理页/告警） */
-      netDeposit: cf.netDeposit, openingCost: cf.openingCost, effectiveInvest: cf.effectiveInvest,
+      netDeposit: cf.netDeposit, openingCost: cf.openingCost, openingMargin: cf.openingMargin,
+      effectiveInvest: cf.effectiveInvest,
       netInvest: round2(netInvest),         // 证券净投入（可增可减）
       buyTotal: round2(buyTotal),           // 累计买入/申购（仅展示）
       /* 手续费与融资（v7） */
