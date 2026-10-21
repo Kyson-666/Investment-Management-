@@ -158,7 +158,9 @@ CREATE TABLE IF NOT EXISTS cash_flow (
 );
 CREATE INDEX IF NOT EXISTS idx_cashflow_user ON cash_flow(user_id);
 CREATE INDEX IF NOT EXISTS idx_cashflow_account_date ON cash_flow(account_id, date);
-CREATE INDEX IF NOT EXISTS idx_cashflow_to_account ON cash_flow(to_account_id, date);
+/* idx_cashflow_to_account 引用 to_account_id（migrate 补的列），
+   若在 SCHEMA 里创建，「cash_flow 表已存在但缺划转列」的老库会在 init 时崩溃；
+   该索引改到 migrate() 尾部补列之后创建（新库同样经 migrate 创建，幂等）。 */
 
 -- 定投计划
 CREATE TABLE IF NOT EXISTS dca_plan (
@@ -265,6 +267,8 @@ function migrate() {
     SET input_currency = COALESCE((SELECT a.currency FROM account a WHERE a.id = cash_flow.account_id), 'CNY'),
         input_amount   = amount
     WHERE input_currency IS NULL OR input_amount IS NULL`).run();
+  /* 依赖补列的索引必须在补列之后创建，否则老库（表已存在但缺列）init 即崩溃 */
+  db.exec('CREATE INDEX IF NOT EXISTS idx_cashflow_to_account ON cash_flow(to_account_id, date)');
   migrateV5Caliber();
   migrateOpeningFx();
 }

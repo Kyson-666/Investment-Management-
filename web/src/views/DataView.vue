@@ -110,22 +110,22 @@
       </p>
       <el-table :data="reportData?.rows || []" size="small" max-height="420" empty-text="暂无数据">
         <el-table-column prop="month" label="月份" width="96" />
-        <el-table-column label="已存快照" align="right">
+        <el-table-column prop="saved" label="已存快照" align="right" width="118" class-name="num">
           <template #default="{ row }">{{ row.saved == null ? '—' : `¥${money(row.saved)}` }}</template>
         </el-table-column>
-        <el-table-column label="来源" width="76">
+        <el-table-column prop="savedSource" label="来源" align="left" width="76">
           <template #default="{ row }">{{ row.savedSource ? sourceLabel(row.savedSource) : '—' }}</template>
         </el-table-column>
-        <el-table-column label="派生值" align="right">
+        <el-table-column prop="derived" label="派生值" align="right" width="118" class-name="num">
           <template #default="{ row }">¥{{ money(row.derived) }}</template>
         </el-table-column>
-        <el-table-column label="差异" align="right">
+        <el-table-column prop="diff" label="差异" align="right" width="110" class-name="num">
           <template #default="{ row }">{{ row.diff == null ? '—' : signedMoney(row.diff) }}</template>
         </el-table-column>
-        <el-table-column label="差异率" width="90" align="right">
+        <el-table-column prop="diffPct" label="差异率" align="right" width="94" class-name="num">
           <template #default="{ row }">{{ row.diffPct == null ? '—' : `${(row.diffPct * 100).toFixed(2)}%` }}</template>
         </el-table-column>
-        <el-table-column label="派生质量" width="104">
+        <el-table-column prop="complete" label="派生质量" width="112">
           <template #default="{ row }">
             <el-tag v-if="row.complete" type="success" size="small">完整</el-tag>
             <el-tag v-else type="warning" size="small">估算 {{ row.estimatedPrice || 0 }} 项</el-tag>

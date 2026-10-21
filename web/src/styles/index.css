@@ -261,6 +261,8 @@ body {
 .el-form-item__label { font-size: 13px; }
 .el-tag { border-radius: 11px; }
 .el-menu { border-right: none !important; }
+/* 数值单元格：金额/比例不得折行（列宽不足时由表格横向滚动接管，保证数字可读） */
+.el-table td.el-table__cell.num .cell { white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 /* ---------- 杂项 ---------- */
 .empty {

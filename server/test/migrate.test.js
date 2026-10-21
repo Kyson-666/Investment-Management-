@@ -69,6 +69,39 @@ test('幂等：迁移重复执行不二次改写', () => {
   assert.equal(db.getConfig(MARKER).fixed, 0, '已修正的行不再满足 fx=1 判定，第二次应 0 笔');
 });
 
+/* 老库升级兼容：v4 风格老库（cash_flow 无划转列、user 无 token_version）走 init
+   必须在 SCHEMA 执行阶段不崩溃（依赖补列的索引已移至 migrate 尾部创建） */
+const OLD_DB = path.join(os.tmpdir(), `invest-migrate-oldschema-${process.pid}.db`);
+test('老库兼容：cash_flow 缺划转列的库 init 不崩溃，补列与索引完成', () => {
+  const Database = require('better-sqlite3');
+  const old = new Database(OLD_DB);
+  old.exec(`CREATE TABLE user (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL, email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user',
+      status TEXT NOT NULL DEFAULT 'active', created_at TEXT, last_login_at TEXT,
+      settings_json TEXT NOT NULL DEFAULT '{}');
+    CREATE TABLE cash_flow (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+      account_id INTEGER NOT NULL, date TEXT NOT NULL, kind TEXT NOT NULL,
+      amount REAL NOT NULL, fx REAL, note TEXT);`);
+  old.close();
+
+  db.init(OLD_DB);   // 修复前此处崩溃：no such column: to_account_id
+  const cols = db.getDb().prepare('PRAGMA table_info(cash_flow)').all().map(c => c.name);
+  assert.ok(cols.includes('to_account_id'), 'migrate 应补 to_account_id');
+  assert.ok(cols.includes('input_currency'), 'migrate 应补 input_currency');
+  const idx = db.getDb().prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_cashflow_to_account'").get();
+  assert.ok(idx, '补列后应创建 idx_cashflow_to_account');
+  assert.ok(db.getDb().prepare('PRAGMA table_info(user)').all().map(c => c.name).includes('token_version'),
+    'migrate 应补 user.token_version');
+  try { db.getDb().close(); } catch { /* ignore */ }
+  for (const f of [OLD_DB, OLD_DB + '-wal', OLD_DB + '-shm']) {
+    try { fs.rmSync(f, { force: true }); } catch { /* ignore */ }
+  }
+});
+
 test.after(() => {
   for (const f of [TMP_DB, TMP_DB + '-wal', TMP_DB + '-shm']) {
     try { fs.rmSync(f, { force: true }); } catch { /* ignore */ }
