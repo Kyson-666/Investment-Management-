@@ -71,6 +71,7 @@ export const assetsApi = {
   update: (id, b) => api.put(`/api/assets/${id}`, b),
   setAlerts: (id, alerts) => api.put(`/api/assets/${id}/alerts`, { alerts }),
   /* 期初建仓维护（v1.0.9）：转为买入会扣减账户现金，解决「入金未被建仓消耗」的假现金 */
+  getOpening: (id) => api.get(`/api/assets/${id}/opening`),
   saveOpening: (id, b) => api.put(`/api/assets/${id}/opening`, b),
   clearOpening: (id) => api.del(`/api/assets/${id}/opening`),
   convertOpening: (id) => api.post(`/api/assets/${id}/opening/convert-to-buy`),

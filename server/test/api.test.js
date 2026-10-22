@@ -1044,6 +1044,14 @@ test('期初建仓：修改份额、融资上限校验、转为买入后现金�
     accountId: acc.json.id, date: '2025-01-05', kind: 'deposit', amount: 1000,
   });
 
+  /* 读取接口：回填给编辑弹窗的明细 */
+  let g = await api('GET', `/api/assets/${aid}/opening`, adminToken);
+  assert.equal(g.status, 200);
+  assert.equal(g.json.opening.qty, 100);
+  assert.equal(g.json.opening.price, 10);
+  assert.equal(g.json.opening.date, '2025-01-05');
+  assert.equal(g.json.marginCNY, 0);
+
   const kpi = async () => (await api('GET', `/api/compute?accountId=${acc.json.id}`, adminToken)).json.kpis;
   let k = await kpi();
   assert.equal(k.invest, 1000, '累计投入 = 净入金');

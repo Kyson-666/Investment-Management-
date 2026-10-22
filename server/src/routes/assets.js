@@ -263,6 +263,17 @@ function openingEventOf(db, assetId, userId) {
     .get(assetId, userId);
 }
 
+/** 读取期初建仓明细（供编辑弹窗回填：份额 / 成本单价 / 本金 / 日期 / 汇率） */
+router.get('/:id/opening', asyncHandler(async (req, res) => {
+  const row = ownedRow(getDb(), 'asset', req.params.id, req.user.id);
+  if (!row) return notFound(res);
+  const ex = openingEventOf(getDb(), row.id, req.user.id);
+  res.json({
+    opening: ex ? { qty: ex.qty, price: ex.price, amount: ex.amount, date: ex.date, fx: ex.fx } : null,
+    marginCNY: row.margin_cny || 0,   // 期初融资即资产级融资（编辑弹窗「融资」字段）
+  });
+}));
+
 /** 新增或修改期初建仓（份额 / 成本单价或本金 / 日期 / 期初融资） */
 router.put('/:id/opening', asyncHandler(async (req, res) => {
   const row = ownedRow(getDb(), 'asset', req.params.id, req.user.id);

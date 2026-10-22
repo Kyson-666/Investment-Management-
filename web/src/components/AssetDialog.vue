@@ -134,27 +134,36 @@
         </template>
       </template>
 
-      <!-- 编辑态：期初建仓维护（v1.0.9）——期初建仓创建后需要能改/清除/转为买入 -->
+      <!-- 编辑态：期初建仓维护（v1.0.9）——可改份额/成本/日期，可转买入或清除 -->
       <template v-if="isEdit">
         <el-divider content-position="left"><span class="form-tip">期初建仓</span></el-divider>
         <div class="form-tip" style="margin:-6px 0 10px 4px;line-height:1.65">
           「期初建仓」按设计<b>不产生现金流</b>（视为记账开始前已持有）。
           若这笔持仓其实是记账期内用<b>入金</b>买入的，请转为<b>买入/申购</b>事件 ——
           否则入金会一直挂在账户现金上，与持仓重复，造成净资产虚增。
+          <br>期初融资沿用上方「融资」字段（按 CNY 计）。
         </div>
-        <el-form-item label="当前">
-          <span v-if="hasOpening">
-            {{ fmtQty(openingInfo.qty) }} 份 ｜ 成本 ¥{{ money(openingInfo.cost) }}
-            <template v-if="openingInfo.margin > 0"> ｜ 期初融资 ¥{{ money(openingInfo.margin) }}</template>
-          </span>
-          <span v-else class="muted">未设置期初建仓</span>
-        </el-form-item>
-        <el-form-item v-if="hasOpening" label="操作">
-          <div class="opening-actions">
-            <el-button type="warning" plain :loading="opsBusy" @click="convertToBuy">转为买入/申购</el-button>
-            <el-button type="danger" plain :loading="opsBusy" @click="clearOpening">清除期初建仓</el-button>
-          </div>
-        </el-form-item>
+        <template v-if="openingLoaded">
+          <el-form-item label="期初份额">
+            <el-input-number v-model="openingForm.qty" :min="0" :precision="4" controls-position="right" class="opening-field" />
+          </el-form-item>
+          <el-form-item :label="`期初成本单价(${assetCcy})`">
+            <el-input-number v-model="openingForm.costPrice" :min="0" :precision="6" controls-position="right" class="opening-field" />
+            <span class="form-tip" style="margin-left:8px">期初本金 {{ openingAmountLocal }}</span>
+          </el-form-item>
+          <el-form-item label="建仓日期">
+            <el-date-picker v-model="openingForm.date" type="date" value-format="YYYY-MM-DD" class="opening-field" />
+          </el-form-item>
+          <el-form-item v-if="hasServerOpening" label="操作">
+            <div class="opening-actions">
+              <el-button type="warning" plain :loading="opsBusy" @click="convertToBuy">转为买入/申购</el-button>
+              <el-button type="danger" plain :loading="opsBusy" @click="clearOpening">清除期初建仓</el-button>
+            </div>
+          </el-form-item>
+          <el-form-item v-else label=" ">
+            <span class="form-tip">当前未设置期初建仓；填写份额与成本后点「保存」即可补录。</span>
+          </el-form-item>
+        </template>
       </template>
     </el-form>
     <template #footer>
@@ -165,7 +174,7 @@
 </template>
 
 <script setup>
-import { reactive, ref, watch, computed } from 'vue';
+import { reactive, ref, watch, computed, onMounted, nextTick } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { assetsApi, fxApi } from '../api';
 import { ACCOUNT_KIND_LABEL, todayStr, money } from '../utils/format';
@@ -192,29 +201,79 @@ const form = reactive({});
 const store = usePortfolioStore();
 
 /* ---------- 编辑态：期初建仓维护（v1.0.9） ---------- */
-/** 当前资产的期初建仓（份额 / 成本 / 期初融资），数据来自 store 的 calc 结果 */
-const openingInfo = computed(() => {
-  const h = store.holdings.find(x => x.asset.id === (props.asset && props.asset.id));
-  const c = (h && h.calc) || {};
-  return {
-    qty: +(c.openingQty || 0),
-    cost: +(c.openingCostCNY || 0),
-    margin: +((props.asset && props.asset.marginCNY) || 0),
-  };
-});
-const hasOpening = computed(() => openingInfo.value.qty > 0);
+const assetCcy = computed(() => (props.asset && props.asset.currency) || 'CNY');
+/** 服务端已有的期初建仓（用于判断是否展示「转为买入 / 清除」）与改动比较 */
+const loadedOpening = ref(null);
+const openingLoaded = ref(false);
+const openingForm = reactive({ qty: 0, costPrice: 0, date: '' });
+const hasServerOpening = computed(() => !!loadedOpening.value);
 const opsBusy = ref(false);
 const fmtQty = v => (+v || 0).toLocaleString('zh-CN', { maximumFractionDigits: 4 });
 
+/** 期初本金（资产币种口径，供表单提示） */
+const openingAmountLocal = computed(() => {
+  const v = (+openingForm.qty || 0) * (+openingForm.costPrice || 0);
+  return `${money(v)} ${assetCcy.value}`;
+});
+/** 期初建仓的 CNY 成本（用于转换确认里的现金扣减提示） */
+const openingCostCNY = computed(() => {
+  const q = +openingForm.qty || 0;
+  const p = +openingForm.costPrice || 0;
+  if (!(q > 0)) return 0;
+  if (assetCcy.value === 'CNY') return +(q * p).toFixed(2);
+  const fx = +((loadedOpening.value && loadedOpening.value.fx) || 0) || (+form.rate > 0 ? +form.rate : 0);
+  return +(q * p * (fx > 0 ? fx : 1)).toFixed(2);
+});
+
+/** 打开弹窗时回填期初建仓明细（编辑态） */
+onMounted(async () => {
+  if (!isEdit.value) { openingLoaded.value = true; return; }
+  try {
+    const r = await assetsApi.getOpening(props.asset.id);
+    loadedOpening.value = r.opening || null;
+    openingForm.qty = r.opening ? +r.opening.qty : 0;
+    openingForm.costPrice = r.opening ? +r.opening.price : 0;
+    openingForm.date = r.opening ? String(r.opening.date).slice(0, 10) : todayStr();
+  } catch (e) {
+    /* 回填失败不阻塞主表单，但要告知：否则用户会以为改动没生效 */
+    ElMessage.warning('期初建仓明细读取失败：' + (e.message || '请稍后重试'));
+  }
+  openingLoaded.value = true;
+});
+
+/** 保存时同步期初建仓的改动（份额 / 成本单价 / 日期；未改动则跳过） */
+async function persistOpening() {
+  if (!isEdit.value || !openingLoaded.value) return;
+  const qty = +openingForm.qty || 0;
+  const price = +openingForm.costPrice || 0;
+  if (!(qty > 0)) {
+    if (loadedOpening.value) {
+      throw new Error('期初份额需大于 0；如需移除期初建仓请用「清除期初建仓」');
+    }
+    return;
+  }
+  const date = openingForm.date || todayStr();
+  const prev = loadedOpening.value;
+  const changed = !prev
+    || Math.abs((+prev.qty || 0) - qty) > 1e-9
+    || Math.abs((+prev.price || 0) - price) > 1e-9
+    || String(prev.date || '').slice(0, 10) !== date;
+  if (!changed) return;
+  await assetsApi.saveOpening(props.asset.id, { qty, costPrice: price, date });
+  loadedOpening.value = { qty, price, amount: +(qty * price).toFixed(2), date };
+}
+
 /** 期初建仓 → 买入/申购事件：份额与持仓成本不变，现金按「成交额 − 融资」扣减 */
 async function convertToBuy() {
-  const { qty, cost, margin } = openingInfo.value;
+  const qty = +openingForm.qty || 0;
+  const cost = openingCostCNY.value;
+  const margin = +form.margin || 0;
   const selfPay = Math.max(0, +(cost - margin).toFixed(2));
   const label = props.asset && props.asset.type === 'stock' ? '买入' : '申购';
   try {
     await ElMessageBox.confirm(
       `将把 ${fmtQty(qty)} 份 / 成本 ¥${money(cost)} 的期初建仓转为「${label}」事件。\n\n`
-      + `持仓份额与成本不变；账户现金将扣减 ¥${money(selfPay)}（= 成交额 − 期初融资 ¥${money(margin)}）。\n`
+      + `持仓份额与成本不变；账户现金将扣减 ¥${money(selfPay)}（= 成交额 − 融资 ¥${money(margin)}）。\n`
       + '若现金因此变为负数，说明还有本金未录入金，请到「出入金」页补录。',
       `确认转为${label}？`,
       { type: 'warning', confirmButtonText: `转为${label}`, cancelButtonText: '取消' },
@@ -235,7 +294,9 @@ async function convertToBuy() {
 
 /** 清除期初建仓：份额与期初融资一并移除（不可撤销） */
 async function clearOpening() {
-  const { qty, cost, margin } = openingInfo.value;
+  const qty = +openingForm.qty || 0;
+  const cost = openingCostCNY.value;
+  const margin = +((props.asset && props.asset.marginCNY) || 0);
   try {
     await ElMessageBox.confirm(
       `将删除 ${fmtQty(qty)} 份 / 成本 ¥${money(cost)} 的期初建仓`
@@ -408,6 +469,12 @@ function buildOpening() {
 }
 
 async function save() {
+  /* el-input-number 在 change（失焦）时才同步 modelValue：用户输完直接点「保存」会读到旧值，
+     这里先主动失焦并等一个 tick，确保份额/单价等最新输入被提交。 */
+  if (document.activeElement && typeof document.activeElement.blur === 'function') {
+    document.activeElement.blur();
+    await nextTick();
+  }
   try {
     if (!form.name.trim()) return ElMessage.warning('请填写资产名称');
     saving.value = true;
@@ -427,6 +494,7 @@ async function save() {
         }
       }
       await assetsApi.update(props.asset.id, payload);
+      await persistOpening();          // 期初建仓（份额/成本/日期）有改动时一并提交
       ElMessage.success('已保存');
     } else {
       if (!form.accountId) return ElMessage.warning('请选择所属账户');
@@ -472,9 +540,11 @@ function onClosed() { /* form 保留无影响 */ }
 <style scoped>
 /* 期初建仓操作按钮：桌面并排、移动端整行（与项目其他操作区一致） */
 .opening-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.opening-field { width: 180px; }
 .opening-actions :deep(.el-button) { margin-left: 0; }
 @media (max-width: 768px) {
   .opening-actions { flex-direction: column; width: 100%; }
+  .opening-field { width: 100%; }
   .opening-actions :deep(.el-button) { width: 100%; margin-left: 0; }
 }
 </style>
