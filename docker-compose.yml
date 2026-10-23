@@ -6,7 +6,7 @@
 services:
   app:
     build: .
-    image: "${IMAGE:-ghcr.io/hanyuestar/investment-management:latest}"
+    image: "${IMAGE:-ghcr.io/kyson-666/investment-management:latest}"
     container_name: investment-manager
     ports:
       - "${PORT:-8080}:8080"
