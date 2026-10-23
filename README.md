@@ -1,11 +1,11 @@
 # 投资管家 · 个人投资资产管理系统
 
 > 界面顶栏显示的版本号自动取自 `web/package.json` 的 `version`，随发版同步；
-> 历史版本见 [Releases](https://github.com/hanyuestar/Investment-Management-/tags)。
+> 历史版本见 [Releases](https://github.com/Kyson-666/Investment-Management-/tags)。
 
 [![License: MIT + Attribution](https://img.shields.io/badge/License-MIT%20%2B%20Attribution-blue.svg)](LICENSE)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fhanyuestar%2Finvestment--management-blue?logo=docker)](https://github.com/hanyuestar/Investment-Management-/pkgs/container/investment-management)
-[![Version](https://img.shields.io/badge/version-v1.0.0-green.svg)](https://github.com/hanyuestar/Investment-Management-/releases)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fkyson-666%2Finvestment--management-blue?logo=docker)](https://github.com/Kyson-666/Investment-Management-/pkgs/container/investment-management)
+[![Version](https://img.shields.io/badge/version-v1.0.0-green.svg)](https://github.com/Kyson-666/Investment-Management-/releases)
 
 一个自托管的**个人多币种投资资产管理系统**：管理 A 股 / 美股 / 基金 / 理财 / 债券的账户、持仓、交易流水、定投、出入金，按发生日锁定汇率，服务端实时计算成本、盈亏、XIRR / TWR、资产配置、集中度、分红税与资本利得估算，并提供月末快照、基准对比、备份导入导出与多用户管理后台。
 
@@ -21,31 +21,31 @@
 
 | 总览 · 8 张 KPI + 持仓看板 + 类型分布 | 绩效 · XIRR / TWR / 基准 α 与月度对比 |
 |---|---|
-| ![总览](https://cdn.jsdelivr.net/gh/hanyuestar/Investment-Management-@v1.0.0/screenshots/desktop-dashboard.png) | ![绩效](https://cdn.jsdelivr.net/gh/hanyuestar/Investment-Management-@v1.0.0/screenshots/desktop-performance.png) |
+| ![总览](https://cdn.jsdelivr.net/gh/Kyson-666/Investment-Management-@v1.0.0/screenshots/desktop-dashboard.png) | ![绩效](https://cdn.jsdelivr.net/gh/Kyson-666/Investment-Management-@v1.0.0/screenshots/desktop-performance.png) |
 
 | 配置 · 大类环形图 + 目标比例与再平衡建议 | 风险 · 持仓集中度 + 止盈止损预警 |
 |---|---|
-| ![配置](https://cdn.jsdelivr.net/gh/hanyuestar/Investment-Management-@v1.0.0/screenshots/desktop-allocation.png) | ![风险](https://cdn.jsdelivr.net/gh/hanyuestar/Investment-Management-@v1.0.0/screenshots/desktop-risk.png) |
+| ![配置](https://cdn.jsdelivr.net/gh/Kyson-666/Investment-Management-@v1.0.0/screenshots/desktop-allocation.png) | ![风险](https://cdn.jsdelivr.net/gh/Kyson-666/Investment-Management-@v1.0.0/screenshots/desktop-risk.png) |
 
 **更多页面**
 
 | 交易流水 · 买卖/分红/送股/拆分与锁定汇率 | 持仓 · 按类型筛选与关键词搜索 |
 |---|---|
-| ![交易流水](https://cdn.jsdelivr.net/gh/hanyuestar/Investment-Management-@v1.0.0/screenshots/desktop-transactions.png) | ![持仓](https://cdn.jsdelivr.net/gh/hanyuestar/Investment-Management-@v1.0.0/screenshots/desktop-holdings.png) |
+| ![交易流水](https://cdn.jsdelivr.net/gh/Kyson-666/Investment-Management-@v1.0.0/screenshots/desktop-transactions.png) | ![持仓](https://cdn.jsdelivr.net/gh/Kyson-666/Investment-Management-@v1.0.0/screenshots/desktop-holdings.png) |
 
 | 税务 · 分红税分档与资本利得明细 | 收益报表 · 月度/年度已实现与含浮动 |
 |---|---|
-| ![税务](https://cdn.jsdelivr.net/gh/hanyuestar/Investment-Management-@v1.0.0/screenshots/desktop-tax.png) | ![收益报表](https://cdn.jsdelivr.net/gh/hanyuestar/Investment-Management-@v1.0.0/screenshots/desktop-reports.png) |
+| ![税务](https://cdn.jsdelivr.net/gh/Kyson-666/Investment-Management-@v1.0.0/screenshots/desktop-tax.png) | ![收益报表](https://cdn.jsdelivr.net/gh/Kyson-666/Investment-Management-@v1.0.0/screenshots/desktop-reports.png) |
 
 | 定投 · 按月计划与幂等批量生成 | 管理后台 · 用户 / 汇率 / SMTP |
 |---|---|
-| ![定投](https://cdn.jsdelivr.net/gh/hanyuestar/Investment-Management-@v1.0.0/screenshots/desktop-dca.png) | ![管理后台](https://cdn.jsdelivr.net/gh/hanyuestar/Investment-Management-@v1.0.0/screenshots/desktop-admin.png) |
+| ![定投](https://cdn.jsdelivr.net/gh/Kyson-666/Investment-Management-@v1.0.0/screenshots/desktop-dca.png) | ![管理后台](https://cdn.jsdelivr.net/gh/Kyson-666/Investment-Management-@v1.0.0/screenshots/desktop-admin.png) |
 
 **移动端适配**（≤768px 自动切换：抽屉导航 + 单列堆叠 + 宽表卡片化）
 
 | 抽屉导航（汉堡按钮唤出，含账户视角切换） | 交易流水卡片化（字段与桌面表格一致） |
 |---|---|
-| ![移动端抽屉导航](https://cdn.jsdelivr.net/gh/hanyuestar/Investment-Management-@v1.0.0/screenshots/mobile-drawer.png) | ![移动端交易流水](https://cdn.jsdelivr.net/gh/hanyuestar/Investment-Management-@v1.0.0/screenshots/mobile-transactions.png) |
+| ![移动端抽屉导航](https://cdn.jsdelivr.net/gh/Kyson-666/Investment-Management-@v1.0.0/screenshots/mobile-drawer.png) | ![移动端交易流水](https://cdn.jsdelivr.net/gh/Kyson-666/Investment-Management-@v1.0.0/screenshots/mobile-transactions.png) |
 
 ---
 
@@ -153,7 +153,7 @@ npm run dev                # http://localhost:5173 ，/api 自动代理到 8080
 | `admin` | `admin12345` | 管理员 | 数据库中无管理员时首启自动创建，**生产环境务必修改** |
 | `demo` | `demo1234` | 普通用户 | 执行 `seed:demo` 或页面“载入示例数据”后存在 |
 
-详细步骤见 [`01 快速开始`](https://github.com/hanyuestar/Investment-Management-/wiki/01-快速开始)。
+详细步骤见 [`01 快速开始`](https://github.com/Kyson-666/Investment-Management-/wiki/01-快速开始)。
 
 ---
 
@@ -163,14 +163,14 @@ npm run dev                # http://localhost:5173 ，/api 自动代理到 8080
 
 ```bash
 cp .env.example .env        # 修改 ADMIN_PASSWORD；JWT_SECRET 可留空（首启自动生成）
-docker compose pull         # 拉取 ghcr.io/hanyuestar/investment-management:latest
+docker compose pull         # 拉取 ghcr.io/kyson-666/investment-management:latest
 docker compose up -d
 docker compose ps           # healthcheck 变为 healthy 后访问 http://localhost:8080
 ```
 
 | 注册表 | 镜像 |
 |---|---|
-| GitHub Container Registry | `ghcr.io/hanyuestar/investment-management` |
+| GitHub Container Registry | `ghcr.io/kyson-666/investment-management` |
 | Docker Hub | `kyson666/investment-management` |
 
 - 支持 **linux/amd64** 与 **linux/arm64**（x86 服务器与群晖 ARM 机型均可直接运行）；
@@ -192,7 +192,7 @@ docker compose up -d --build
 - 定时任务（汇率 / 定投 / 备份 / 预警 / 月末快照）在容器内运行；
 - 升级时 `docker compose pull && docker compose up -d`（或重新 `build`）即可，SQLite 表使用 `CREATE TABLE IF NOT EXISTS`，数据不丢。
 
-详见 [`02 Docker 部署`](https://github.com/hanyuestar/Investment-Management-/wiki/02-Docker部署)。
+详见 [`02 Docker 部署`](https://github.com/Kyson-666/Investment-Management-/wiki/02-Docker部署)。
 
 ---
 
@@ -200,15 +200,15 @@ docker compose up -d --build
 
 | 文档 | 内容 |
 |---|---|
-| [01 快速开始](https://github.com/hanyuestar/Investment-Management-/wiki/01-快速开始) | 环境要求、本地开发、演示数据、默认账号、首启做什么 |
-| [02 Docker 部署](https://github.com/hanyuestar/Investment-Management-/wiki/02-Docker部署) | 镜像构建、compose 配置、环境变量、数据卷与升级 |
-| [03 API 手册](https://github.com/hanyuestar/Investment-Management-/wiki/03-API手册) | 鉴权方式与全部 REST 端点、请求/响应字段说明 |
-| [04 计算口径与公式](https://github.com/hanyuestar/Investment-Management-/wiki/04-计算口径与公式) | 成本、双币种、XIRR/TWR、分红税、资本利得、配置/集中度口径 |
-| [05 前端页面说明](https://github.com/hanyuestar/Investment-Management-/wiki/05-前端页面说明) | 17 个页面的用途、操作与数据来源 |
-| [06 管理后台与鉴权](https://github.com/hanyuestar/Investment-Management-/wiki/06-管理后台与鉴权) | JWT 机制、角色权限、用户管理、SMTP 与验证码 |
-| [07 备份与导入导出](https://github.com/hanyuestar/Investment-Management-/wiki/07-备份与导入导出) | JSON 备份格式、自动备份策略、迁移与恢复 |
-| [08 FAQ](https://github.com/hanyuestar/Investment-Management-/wiki/08-FAQ) | 常见问题与排查 |
-| [09 开发与测试](https://github.com/hanyuestar/Investment-Management-/wiki/09-开发与测试) | 代码约定、测试如何运行、演示数据验收数字 |
+| [01 快速开始](https://github.com/Kyson-666/Investment-Management-/wiki/01-快速开始) | 环境要求、本地开发、演示数据、默认账号、首启做什么 |
+| [02 Docker 部署](https://github.com/Kyson-666/Investment-Management-/wiki/02-Docker部署) | 镜像构建、compose 配置、环境变量、数据卷与升级 |
+| [03 API 手册](https://github.com/Kyson-666/Investment-Management-/wiki/03-API手册) | 鉴权方式与全部 REST 端点、请求/响应字段说明 |
+| [04 计算口径与公式](https://github.com/Kyson-666/Investment-Management-/wiki/04-计算口径与公式) | 成本、双币种、XIRR/TWR、分红税、资本利得、配置/集中度口径 |
+| [05 前端页面说明](https://github.com/Kyson-666/Investment-Management-/wiki/05-前端页面说明) | 17 个页面的用途、操作与数据来源 |
+| [06 管理后台与鉴权](https://github.com/Kyson-666/Investment-Management-/wiki/06-管理后台与鉴权) | JWT 机制、角色权限、用户管理、SMTP 与验证码 |
+| [07 备份与导入导出](https://github.com/Kyson-666/Investment-Management-/wiki/07-备份与导入导出) | JSON 备份格式、自动备份策略、迁移与恢复 |
+| [08 FAQ](https://github.com/Kyson-666/Investment-Management-/wiki/08-FAQ) | 常见问题与排查 |
+| [09 开发与测试](https://github.com/Kyson-666/Investment-Management-/wiki/09-开发与测试) | 代码约定、测试如何运行、演示数据验收数字 |
 
 ---
 
@@ -251,7 +251,7 @@ npm test                   # = calc 115 断言 + api 54 用例 + regression 15 �
 |---|---|
 | 基础协议 | [MIT License](LICENSE)（允许自由使用、修改、分发、商用、再许可） |
 | **附加条款** | [LICENSE-ADDITIONAL.md](LICENSE-ADDITIONAL.md) —— **使用者与 Fork／衍生分支必须完整保留原作者署名**，不得移除、遮盖、替换或伪造 |
-| 修改后分发 | 须注明「基于 hanyuestar/Investment-Management- 修改」，并不得暗示为原作者官方版本 |
+| 修改后分发 | 须注明「基于 Kyson-666/Investment-Management- 修改」，并不得暗示为原作者官方版本 |
 | 许可识别 | GitHub 侧边栏显示 MIT；附加条款与 MIT **同时生效**，其约束力强于 MIT 原文 |
 
 **一句话**：随便用、随便改、可商用，**但请保留我的名字**。
@@ -270,13 +270,13 @@ npm test                   # = calc 115 断言 + api 54 用例 + regression 15 �
 ### 合作与联系
 
 - **合作意向 / 定制开发 / 商务授权 / 许可条款澄清**：hanyueppy@foxmail.com
-- 问题反馈与功能建议：[GitHub Issues](https://github.com/hanyuestar/Investment-Management-/issues)
+- 问题反馈与功能建议：[GitHub Issues](https://github.com/Kyson-666/Investment-Management-/issues)
 
 > 本项目允许自由使用与商用，唯一硬性要求是**保留原作者署名**。感谢尊重。
 
 ## 十、版本更新
 
-> 面向使用者的更新说明。完整历史见 [Releases](https://github.com/hanyuestar/Investment-Management-/tags)。
+> 面向使用者的更新说明。完整历史见 [Releases](https://github.com/Kyson-666/Investment-Management-/tags)。
 
 ### v1.0.9（2026-10-21）
 
